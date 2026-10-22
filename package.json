@@ -1,0 +1,16 @@
+{
+  "name": "agent-town",
+  "version": "0.1.0",
+  "private": true,
+  "description": "把本机 Claude Code 与 Codex 的实时工作画成一座 3D 微缩小镇",
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "hooks:install": "node scripts/install-hooks.js",
+    "hooks:uninstall": "node scripts/install-hooks.js --uninstall"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "three": "0.170.0"
+  }
+}

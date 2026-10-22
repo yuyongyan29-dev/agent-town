@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Agent 小镇</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='10' width='24' height='18' rx='4' fill='%23e07a5f'/%3E%3Crect x='10' y='4' width='12' height='8' rx='3' fill='%237b7cff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+  <script type="importmap">
+    { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/" } }
+  </script>
+</head>
+<body>
+  <div id="scene"></div>
+
+  <div id="hud">
+    <header class="brand card">
+      <div class="logo"><span></span><span></span></div>
+      <div>
+        <b>Agent 小镇</b>
+        <small>每个 agent 一个街区的实时流水线</small>
+      </div>
+      <span class="live" id="live"><i></i><em>实时</em></span>
+    </header>
+
+    <section class="stats card" id="stats"></section>
+
+    <div class="clock card" id="clock">
+      <b id="clock-time">--:--</b>
+      <span id="clock-date"></span>
+      <span id="clock-weather"></span>
+    </div>
+
+    <aside class="left card" id="left">
+      <div class="left-head">
+        <b>会话</b>
+        <span class="filter" id="filter" hidden></span>
+        <label class="switch"><input type="checkbox" id="show-sleep"><span>显示休眠</span></label>
+      </div>
+      <div class="sessions" id="sessions"></div>
+      <div class="sec-title">定时任务 <a href="#" data-tab="schedule">全部</a></div>
+      <div class="sched-mini" id="sched-mini"></div>
+      <div class="agent-cards" id="agent-cards"></div>
+    </aside>
+
+    <aside class="drawer card" id="drawer" hidden>
+      <nav class="tabs" id="tabs">
+        <button data-tab="detail">详情</button>
+        <button data-tab="report">报表</button>
+        <button data-tab="schedule">定时</button>
+        <button data-tab="dispatch">派单</button>
+        <button data-tab="events">事件</button>
+        <button class="close" id="drawer-close" title="关闭">×</button>
+      </nav>
+      <div class="drawer-body" id="drawer-body"></div>
+    </aside>
+
+    <nav class="toolbar card" id="toolbar"></nav>
+
+    <canvas class="minimap card" id="minimap" title="小地图：点击跳转 · Shift+拖动街区可挪位置"></canvas>
+
+    <div class="replay card" id="replay" hidden>
+      <b>回放最近 1 小时</b>
+      <span id="replay-clock"></span>
+      <div class="bar"><i id="replay-progress"></i></div>
+      <button data-speed="10">10×</button>
+      <button data-speed="30">30×</button>
+      <button data-speed="60">60×</button>
+      <button id="replay-stop">退出</button>
+    </div>
+
+    <div class="toasts" id="toasts"></div>
+  </div>
+
+  <div class="tank-hint" id="tank-hint">鱼缸模式 · 按 Esc 或双击退出</div>
+  <div class="tooltip" id="tooltip" hidden></div>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>
