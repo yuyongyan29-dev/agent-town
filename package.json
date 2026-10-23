@@ -2,7 +2,22 @@
   "name": "agent-town",
   "version": "0.1.0",
   "private": true,
-  "description": "把本机 Claude Code 与 Codex 的实时工作画成一座 3D 微缩小镇",
+  "description": "把本机 AI 编程 agent（Claude Code、Codex 等）的实时工作画成一座 3D 微缩小镇",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "ai-agents",
+    "visualization",
+    "dashboard",
+    "threejs",
+    "blender"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yuyongyan29-dev/agent-town.git"
+  },
+  "homepage": "https://github.com/yuyongyan29-dev/agent-town#readme",
   "type": "module",
   "scripts": {
     "start": "node server/index.js",
