@@ -2,13 +2,6 @@
 import * as THREE from 'three';
 import { MapControls } from 'three/addons/controls/MapControls.js';
 import { CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { HorizontalTiltShiftShader } from 'three/addons/shaders/HorizontalTiltShiftShader.js';
-import { VerticalTiltShiftShader } from 'three/addons/shaders/VerticalTiltShiftShader.js';
 import { World, loadTown, releaseTextures } from './world.js';
 import { AgentActor } from './agents.js';
 import { ParcelSystem } from './parcels.js';
@@ -31,7 +24,8 @@ const host = document.getElementById('scene');
 // 省电优先：不强制独显；光照阴影都烘焙在贴图里，不开实时阴影
 // 高分屏本身像素够密，不开多重采样抗锯齿：它要额外分配几块全屏缓冲，占上百 MB 显存
 const renderer = new THREE.WebGLRenderer({ antialias: devicePixelRatio < 1.5, powerPreference: 'low-power' });
-// 默认按 1 倍清晰度渲染：贴图里的光影本来就柔和，和 1.5 倍几乎看不出差别，画布显存省一半；「画质：高」时 2 倍
+// 默认按 1 倍清晰度渲染：贴图里的光影本来就柔和，和 1.5 倍几乎看不出差别，画布显存省一半；「画质：高」时 2 倍。
+// 不做泛光、移轴这类全屏后期：每画一帧都要多跑好几遍全屏，在高分屏上能把 GPU 吃到八成
 renderer.setPixelRatio(Math.min(devicePixelRatio, prefs.hq ? 2 : 1));
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -92,29 +86,12 @@ function ensureAgent(id) {
 const toWorld = (v, D) => new THREE.Vector3().copy(v).add(D.group.position);
 const factoryPos = (D, i) => D.factories[i].group.getWorldPosition(new THREE.Vector3());
 
-// ---------- 后期：轻微泛光 + 移轴，做出微缩模型感；只在「画质：高」时启用 ----------
-const target = new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.HalfFloatType, samples: 4 });
-const composer = new EffectComposer(renderer, target);
-composer.addPass(new RenderPass(world.scene, camera));
-const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.25, 0.6, 0.85);
-composer.addPass(bloom);
-const hTilt = new ShaderPass(HorizontalTiltShiftShader);
-const vTilt = new ShaderPass(VerticalTiltShiftShader);
-composer.addPass(hTilt);
-composer.addPass(vTilt);
-composer.addPass(new OutputPass());
 // 左侧面板盖住画面时，把投影中心右移，让小镇落在空出来的区域
 function frame() {
   const show = prefs.panel !== false && !document.body.classList.contains('tank') && innerWidth >= 900;
   const left = show ? document.getElementById('left').getBoundingClientRect().right : 0;
   camera.setViewOffset(innerWidth, innerHeight, -left / 2, 0, innerWidth, innerHeight);
 }
-function sizeTilt() {
-  hTilt.uniforms.h.value = 3.5 / innerWidth;
-  vTilt.uniforms.v.value = 3.5 / innerHeight;
-  hTilt.uniforms.r.value = vTilt.uniforms.r.value = 0.5;
-}
-sizeTilt();
 
 // ---------- HUD ----------
 let snap = null;
@@ -259,7 +236,6 @@ function applyEnv() {
   const kind = prefs.weather === 'auto' ? weather?.kind || 'partly' : prefs.weather;
   world.setEnv({ night, day, kind });
   document.body.classList.toggle('night', night > 0.5);
-  bloom.strength = 0.25 + 0.2 * night;
   hud.setWeather(weather, prefs.weather === 'auto' ? null : WEATHER_NAME[prefs.weather]);
   hud.setToggle('weather', prefs.weather !== 'auto', prefs.weather === 'auto' ? '天气：实况' : `天气：${WEATHER_NAME[prefs.weather]}`);
   hud.setToggle('time', prefs.time !== 'auto', TIME_NAME[prefs.time]);
@@ -422,7 +398,7 @@ async function onAction(act, value) {
       break;
     case 'replay': replay ? stopReplay() : startReplay(); break;
     case 'panel': prefs.panel = !(prefs.panel ?? true); break;
-    case 'quality': prefs.hq = !prefs.hq; pr = MAX_PR(); renderer.setPixelRatio(pr); composer.setPixelRatio(pr); break;
+    case 'quality': prefs.hq = !prefs.hq; pr = MAX_PR(); renderer.setPixelRatio(pr); break;
     case 'showSleep': prefs.showSleep = value; if (snap) onState(snap); break;
   }
   syncPrefs();
@@ -437,7 +413,6 @@ function syncPrefs() {
   hud.setToggle('notify', prefs.notify);
   hud.setToggle('panel', prefs.panel !== false);
   hud.setToggle('quality', prefs.hq, prefs.hq ? '画质：高' : '画质：省电');
-  document.body.classList.toggle('hq', !!prefs.hq);
   frame();
   savePrefs(prefs);
   kick();
@@ -557,9 +532,7 @@ addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   frame();
   renderer.setSize(innerWidth, innerHeight);
-  composer.setSize(innerWidth, innerHeight);
   labels.setSize(innerWidth, innerHeight);
-  sizeTilt();
   kick();
 });
 
@@ -639,7 +612,7 @@ function adapt(now) {
   let next = pr;
   if (fps < 45 && pr > 1) { next = Math.max(1, pr - 0.25); lastDrop = now; }
   else if (fps > 58 && pr < MAX_PR() && now - lastDrop > 30e3) next = Math.min(MAX_PR(), pr + 0.25);
-  if (next !== pr) { pr = next; renderer.setPixelRatio(pr); composer.setPixelRatio(pr); }
+  if (next !== pr) { pr = next; renderer.setPixelRatio(pr); }
 }
 
 const clock = new THREE.Clock();
@@ -670,8 +643,7 @@ function loop(now) {
   world.update(dt, t, camera, controls.target);
   for (const a of Object.values(actors)) if (shown(a.root)) a.update(dt, t, camera);
   parcels.update(dt, t);
-  if (prefs.hq) composer.render();
-  else renderer.render(world.scene, camera);
+  renderer.render(world.scene, camera);
   labels.render(world.scene, camera);
   if (now - lastMap > 250) { lastMap = now; drawMinimap(); }
 

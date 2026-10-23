@@ -16,8 +16,6 @@
   --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
-/* 毛玻璃要对下面每一帧画面重新模糊，只在高画质下开 */
-body.hq .card { background: var(--card); backdrop-filter: blur(14px) saturate(1.2); -webkit-backdrop-filter: blur(14px) saturate(1.2); }
 body.night {
   --bg: #1d2547;
   --card: rgba(28, 33, 56, 0.86);
