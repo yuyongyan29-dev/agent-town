@@ -34,13 +34,13 @@ export const STATUS = {
 
 export const ROOF_COLORS = ['#7fa7d9', '#e58a6d', '#86c5a4', '#f2c26b', '#b59ce0', '#7fc6d9', '#e89aa8'];
 
-const TZ = 'Asia/Shanghai';
-const timeFmt = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-const partsFmt = new Intl.DateTimeFormat('en-US', { timeZone: TZ, month: 'numeric', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
+// 一律按本机时区
+const timeFmt = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+const partsFmt = new Intl.DateTimeFormat('en-US', { month: 'numeric', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
 const WEEK = { Mon: '一', Tue: '二', Wed: '三', Thu: '四', Fri: '五', Sat: '六', Sun: '日' };
 
-/** 北京时间的各个部分 */
-export function shanghaiParts(ts = Date.now()) {
+/** 本机时间的各个部分 */
+export function localParts(ts = Date.now()) {
   const p = Object.fromEntries(partsFmt.formatToParts(new Date(ts)).map((x) => [x.type, x.value]));
   const hh = p.hour === '24' ? '00' : p.hour;
   return { hh, mm: p.minute, month: +p.month, day: +p.day, week: WEEK[p.weekday] || p.weekday, minutes: +hh * 60 + +p.minute };

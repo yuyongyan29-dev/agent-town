@@ -9,16 +9,17 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { HorizontalTiltShiftShader } from 'three/addons/shaders/HorizontalTiltShiftShader.js';
 import { VerticalTiltShiftShader } from 'three/addons/shaders/VerticalTiltShiftShader.js';
-import { World } from './world.js';
+import { World, loadTown, releaseTextures } from './world.js';
 import { AgentActor } from './agents.js';
 import { ParcelSystem } from './parcels.js';
 import { Hud } from './hud.js';
 import { alerts } from './alerts.js';
 import { connect, getJSON } from './api.js';
 import { CAMERA_HOME, DISTRICT, SLOT_Z } from './layout.js';
-import { AGENT, CAT, STATUS, clamp, esc, fmtDur, displayTitle, loadPrefs, savePrefs, setAgents, shanghaiParts, smooth } from './util.js';
+import { AGENT, CAT, STATUS, clamp, esc, fmtDur, displayTitle, loadPrefs, savePrefs, setAgents, localParts, smooth } from './util.js';
 
 const prefs = loadPrefs();
+let raf = 0, timer = 0; // 帧调度（见主循环 kick / loop）
 const WEATHERS = ['auto', 'clear', 'cloudy', 'rain', 'snow', 'storm', 'fog'];
 const WEATHER_NAME = { clear: '晴', partly: '多云', cloudy: '阴', fog: '雾', rain: '雨', snow: '雪', storm: '雷雨' };
 const TIMES = ['auto', 'day', 'night'];
@@ -27,15 +28,14 @@ const RANK = { waiting: 0, stalled: 1, working: 2, done: 3, idle: 4, sleep: 5 };
 
 // ---------- 渲染器与相机 ----------
 const host = document.getElementById('scene');
-// 省电优先：不强制独显；阴影贴图手动刷新（见 world.shadowDirty）
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'low-power' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, prefs.hq ? 2 : 1.5));
+// 省电优先：不强制独显；光照阴影都烘焙在贴图里，不开实时阴影
+// 高分屏本身像素够密，不开多重采样抗锯齿：它要额外分配几块全屏缓冲，占上百 MB 显存
+const renderer = new THREE.WebGLRenderer({ antialias: devicePixelRatio < 1.5, powerPreference: 'low-power' });
+// 默认按 1 倍清晰度渲染：贴图里的光影本来就柔和，和 1.5 倍几乎看不出差别，画布显存省一半；「画质：高」时 2 倍
+renderer.setPixelRatio(Math.min(devicePixelRatio, prefs.hq ? 2 : 1));
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFShadowMap;
-renderer.shadowMap.autoUpdate = false;
 host.appendChild(renderer.domElement);
 
 const labels = new CSS2DRenderer();
@@ -57,6 +57,8 @@ controls.zoomToCursor = true;
 controls.update();
 
 // ---------- 场景 ----------
+await loadTown(); // 烘焙好的模型和布局（public/assets）
+releaseTextures(renderer);
 const world = new World();
 const actors = {};
 const parcels = new ParcelSystem(world, actors);
@@ -196,6 +198,7 @@ function onState(s) {
   }
   if (!replay) parcels.reconcile(s.sessions);
   alerts.badge(s.sessions.filter((x) => x.status === 'waiting').length);
+  kick();
 
   // 状态变化提醒（首个快照只记基线）
   const next = new Map(s.sessions.map((x) => [x.id, x.status]));
@@ -228,6 +231,7 @@ function onEvent(ev) {
   hud.pushEvent(ev);
   if (ev.kind === 'toolEnd' && ev.isError) alerts.play('error');
   if (!replay) parcels.onEvent(ev);
+  kick();
 }
 
 connect({ onState, onEvent, onStatus: (ok) => hud.setLive(ok) });
@@ -241,10 +245,12 @@ async function loadWeather() {
 }
 function applyEnv() {
   const now = Date.now();
-  const mins = shanghaiParts(now).minutes;
-  const toMin = (ts) => shanghaiParts(ts).minutes;
-  const rise = weather?.ok && weather.sunrise ? toMin(weather.sunrise) : 390;
-  const set = weather?.ok && weather.sunset ? toMin(weather.sunset) : 1080;
+  const mins = localParts(now).minutes;
+  const toMin = (ts) => localParts(ts).minutes;
+  // 天气城市和本机同一时区时才用它的日出日落，否则按本机时间 6:30 / 18:00 算昼夜
+  const sameZone = weather?.ok && weather.sunrise && weather.utcOffset === -new Date().getTimezoneOffset() * 60;
+  const rise = sameZone ? toMin(weather.sunrise) : 390;
+  const set = sameZone ? toMin(weather.sunset) : 1080;
   // 日出前后、日落前后各 20 分钟平滑过渡
   let night = 1 - smooth(rise - 20, rise + 20, mins) * (1 - smooth(set - 20, set + 20, mins));
   let day = clamp((mins - rise) / Math.max(1, set - rise));
@@ -257,6 +263,7 @@ function applyEnv() {
   hud.setWeather(weather, prefs.weather === 'auto' ? null : WEATHER_NAME[prefs.weather]);
   hud.setToggle('weather', prefs.weather !== 'auto', prefs.weather === 'auto' ? '天气：实况' : `天气：${WEATHER_NAME[prefs.weather]}`);
   hud.setToggle('time', prefs.time !== 'auto', TIME_NAME[prefs.time]);
+  kick();
 }
 loadWeather();
 setInterval(loadWeather, 10 * 60e3);
@@ -276,6 +283,7 @@ function flyTo(pos, dist, dur = 1.1) {
 }
 function tweenTo(pos, tgt, dur = 1) {
   tween = { t: 0, dur, p0: camera.position.clone(), t0: controls.target.clone(), p1: pos, t1: tgt };
+  kick();
 }
 function orbit(deg) {
   const off = camera.position.clone().sub(controls.target).applyAxisAngle(new THREE.Vector3(0, 1, 0), (deg * Math.PI) / 180);
@@ -365,6 +373,7 @@ async function startReplay(speed = 30) {
   replay = { events, i: 0, clock: t0, t0, t1: Math.max(t1, t0 + 1), speed };
   parcels.timeScale = Math.min(6, speed / 10);
   hud.setToggle('replay', true);
+  kick();
 }
 function stopReplay() {
   if (!replay) return;
@@ -431,6 +440,7 @@ function syncPrefs() {
   document.body.classList.toggle('hq', !!prefs.hq);
   frame();
   savePrefs(prefs);
+  kick();
 }
 syncPrefs();
 addEventListener('pointerdown', () => { if (prefs.sound) alerts.unlock(); }, { once: true });
@@ -550,6 +560,7 @@ addEventListener('resize', () => {
   composer.setSize(innerWidth, innerHeight);
   labels.setSize(innerWidth, innerHeight);
   sizeTilt();
+  kick();
 });
 
 // ---------- 小地图 ----------
@@ -610,20 +621,15 @@ map.addEventListener('click', (e) => {
   flyTo({ x: (e.clientX - r.left - mapView.ox) / mapView.k, z: (e.clientY - r.top - mapView.oz) / mapView.k });
 });
 
-// 帧率按需：操作镜头时 60 帧；有包裹在跑、巡游、鱼缸、下雨雪时 30 帧；其余时间只剩待机小动画，12 帧
+// 按需渲染：操作镜头时跟着屏幕刷新；有包裹在路上、下雨雪、角色在跳、巡游鱼缸时 30 帧；
+// 只剩烟、信标、角色干活的小动作、萤火虫时 12 帧；什么都不动就完全停下，等新数据、鼠标、天气变化再唤醒
 // 掉帧时先降像素比、富余时再升回来
-const MAX_PR = () => Math.min(devicePixelRatio, prefs.hq ? 2 : 1.5);
+const MAX_PR = () => Math.min(devicePixelRatio, prefs.hq ? 2 : 1);
 let pr = MAX_PR(), lastInput = -1e9, lastDraw = 0, lastDrop = -1e9;
 const perf = { n: 0, ms: 0 };
 const lastCam = new THREE.Vector3(), lastTgt = new THREE.Vector3();
-for (const type of ['pointerdown', 'pointermove', 'wheel']) renderer.domElement.addEventListener(type, () => (lastInput = performance.now()), { passive: true });
-function targetFps(now) {
-  const moving = !camera.position.equals(lastCam) || !controls.target.equals(lastTgt);
-  if (now - lastInput < 1500 || tween || drag || moving) return 60;
-  if (!document.hasFocus() && !document.body.classList.contains('tank')) return 12;
-  if (tour || replay || document.body.classList.contains('tank') || world.rain.visible || world.snow.visible || parcels.moving() || Object.values(actors).some((a) => a.bits.length)) return 30;
-  return 12;
-}
+for (const type of ['pointerdown', 'pointermove', 'wheel']) renderer.domElement.addEventListener(type, () => { lastInput = performance.now(); kick(); }, { passive: true });
+controls.addEventListener('change', kick);
 function adapt(now) {
   if (now - lastDraw > 200) return; // 刚从后台切回来，不算
   perf.n++; perf.ms += now - lastDraw;
@@ -637,13 +643,16 @@ function adapt(now) {
 }
 
 const clock = new THREE.Clock();
-let lastClock = 0;
 let lastMap = 0;
-renderer.setAnimationLoop(() => {
-  const now = performance.now();
-  const fps = targetFps(now);
-  if (now - lastDraw < 1000 / fps - 2) return;
-  if (fps === 60) adapt(now);
+function kick() {
+  if (raf) return;
+  clearTimeout(timer); timer = 0;
+  raf = requestAnimationFrame(loop);
+}
+function loop(now) {
+  raf = 0;
+  const hot = now - lastInput < 300 || tween || drag || !camera.position.equals(lastCam) || !controls.target.equals(lastTgt);
+  if (hot) adapt(now);
   lastDraw = now;
   const dt = Math.min(0.1, clock.getDelta());
   const t = clock.elapsedTime;
@@ -654,17 +663,27 @@ renderer.setAnimationLoop(() => {
     controls.target.lerpVectors(tween.t0, tween.t1, k);
     if (tween.t >= 1) tween = null;
   }
-  controls.update();
+  lastCam.copy(camera.position);
+  lastTgt.copy(controls.target);
+  controls.update(); // 阻尼还在滑动时会改相机，下一帧 hot 仍为真
   stepReplay(dt);
   world.update(dt, t, camera, controls.target);
   for (const a of Object.values(actors)) if (shown(a.root)) a.update(dt, t, camera);
   parcels.update(dt, t);
-  if (world.shadowDirty) { renderer.shadowMap.needsUpdate = true; world.shadowDirty = false; }
   if (prefs.hq) composer.render();
   else renderer.render(world.scene, camera);
   labels.render(world.scene, camera);
-  lastCam.copy(camera.position);
-  lastTgt.copy(controls.target);
-  if (t - lastMap > 0.25) { lastMap = t; drawMinimap(); }
-  if (t - lastClock > 1 && !snap) { lastClock = t; hud.setClock(Date.now()); }
-});
+  if (now - lastMap > 250) { lastMap = now; drawMinimap(); }
+
+  const tank = document.body.classList.contains('tank');
+  const fast = tour || replay || tank || world.rain.visible || world.snow.visible || world.flash > 0 || parcels.moving() || Object.values(actors).some((a) => a.busy());
+  // 萤火虫只在别的东西需要重画时顺带动，夜里没动静也能完全停帧
+  const ambient = world.envMoving || Object.values(actors).some((a) => !a.calm())
+    || Object.values(world.districts).some((d) => d.factories.some((f) => f.status === 'working' || f.status === 'waiting'));
+  if (hot) kick();
+  else if (fast) timer = setTimeout(kick, 33);
+  else if (ambient) timer = setTimeout(kick, 83);
+  else timer = setTimeout(drawMinimap, 300); // 停下前把小地图补成最终位置
+}
+setInterval(() => { if (!snap) hud.setClock(Date.now()); }, 1000);
+kick();

@@ -1,8 +1,8 @@
 // 包裹物流：每次工具调用是一个包裹，工厂 → 传送带 → 中转站 → Agent 工作台 → 托盘（失败进次品箱）
 import * as THREE from 'three';
-import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { HUB, BELT_Y } from './layout.js';
 import { CAT } from './util.js';
+import { MODELS, bakedMat } from './world.js';
 
 const SPEED = 6;
 const MAX_PARCELS = 160;
@@ -11,9 +11,6 @@ const BENCH_MAX = 18;
 const STALE_MS = 10 * 60e3;
 const BOX = 0.7;
 
-const boxGeo = new RoundedBoxGeometry(BOX, BOX, BOX, 2, 0.1);
-const tapeGeo = new THREE.BoxGeometry(0.2, 0.02, BOX + 0.02);
-const tapeMat = new THREE.MeshLambertMaterial({ color: '#f3e7cc' });
 const ERROR_COLOR = '#d64541';
 
 export class ParcelSystem {
@@ -34,17 +31,16 @@ export class ParcelSystem {
   make(cat, sub, D) {
     let m = this.pool.pop();
     if (!m) {
-      m = new THREE.Mesh(boxGeo, new THREE.MeshLambertMaterial({ emissive: '#000000' }));
-      m.receiveShadow = true; // 包裹一直在动，不投影（阴影贴图不实时重画）
-      m.add(new THREE.Mesh(tapeGeo, tapeMat));
-      m.children[0].position.y = BOX / 2;
+      // 烘焙好的纸箱 + 胶带；每个包裹自带一份材质，好单独上品类色、发亮、淡出
+      m = new THREE.Group();
+      for (const name of ['parcel', 'tape']) {
+        const part = MODELS[name].clone();
+        part.material = bakedMat(part.material.map);
+        part.position.y = -BOX / 2; // 模型以箱底为原点，这里以箱子中心为原点
+        m.add(part);
+      }
     }
-    const c = CAT[cat]?.color || CAT.other.color;
-    m.material.color.set(c);
-    m.material.emissive.set(c);
-    m.material.emissiveIntensity = 0;
-    m.material.opacity = 1;
-    m.material.transparent = false;
+    this.paint(m, '#ffffff', CAT[cat]?.color || CAT.other.color, 1);
     m.scale.setScalar(sub ? 0.7 : 1);
     m.visible = true;
     D.full.add(m); // 包裹挂在街区下，坐标都是街区局部坐标
@@ -84,8 +80,25 @@ export class ParcelSystem {
 
   paintError(p) {
     p.isError = true;
-    p.mesh.material.color.set(ERROR_COLOR);
-    p.mesh.material.emissive.set(ERROR_COLOR);
+    this.paint(p.mesh, '#e8a49c', ERROR_COLOR, 1);
+  }
+
+  /** 纸箱底色、胶带色、透明度；颜色乘上当前昼夜调色 */
+  paint(m, box, tape, opacity) {
+    const shade = this.world.shade;
+    m.children.forEach((c, i) => {
+      const mat = c.material;
+      if (box) (i ? mat.userData.tint.set(tape) : mat.userData.tint.set(box));
+      mat.color.copy(mat.userData.tint).multiply(shade);
+      mat.transparent = opacity < 1;
+      mat.opacity = opacity;
+    });
+  }
+
+  /** 进行中的包裹微微发亮 */
+  glow(p, k) {
+    const mat = p.mesh.children[0].material;
+    mat.color.copy(mat.userData.tint).multiplyScalar(1 + k).multiply(this.world.shade);
   }
 
   y(p) { return BELT_Y + BOX / 2 * p.s; }
@@ -283,13 +296,12 @@ export class ParcelSystem {
         }
       } else if (p.state === 'bench') {
         // 进行中的包裹发一点光；完成后至少停 0.5 秒再搬去托盘
-        m.material.emissiveIntensity = p.done ? 0 : 0.25 + 0.2 * Math.sin(t * 5 + p.slot);
-        if (p.done && now - Math.max(p.doneAt, p.benchAt) > 500 / this.timeScale) { m.material.emissiveIntensity = 0; this.leaveBench(p); }
+        this.glow(p, p.done ? 0 : 0.18 + 0.12 * Math.sin(t * 5 + p.slot));
+        if (p.done && now - Math.max(p.doneAt, p.benchAt) > 500 / this.timeScale) { this.glow(p, 0); this.leaveBench(p); }
       } else if (p.state === 'reject') {
         p.t += dt;
         if (p.t > 2.5) {
-          m.material.transparent = true;
-          m.material.opacity = Math.max(0, 1 - (p.t - 2.5) / 0.8);
+          this.paint(m, null, null, Math.max(0, 1 - (p.t - 2.5) / 0.8));
           if (p.t > 3.3) this.release(p.key);
         }
       } else if (p.state === 'ship') {
@@ -298,7 +310,7 @@ export class ParcelSystem {
         m.scale.setScalar(p.s * Math.max(0.01, 1 - p.t));
         if (p.t >= 1) this.release(p.key);
       }
-      if (p.state === 'hop' && !p.done && p.next === 'bench') m.material.emissiveIntensity = 0.3;
+      if (p.state === 'hop' && !p.done && p.next === 'bench') this.glow(p, 0.25);
     }
     for (const [a, w] of Object.entries(ds)) {
       for (let i = 0; i < w.belts1.length; i++) w.setBeltSpeed(`f${i}`, busy.has(`${a}:f${i}`) ? v : w.activeSlots.has(i) ? 1.5 : 0);

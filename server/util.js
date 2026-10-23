@@ -1,12 +1,13 @@
 import path from 'node:path';
 
-const dateFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
-const minuteFmt = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
+// 一律按本机时区
+const dateFmt = new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' });
+const minuteFmt = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
 
-/** 北京时间的业务日期 YYYY-MM-DD */
-export const shanghaiDate = (ts) => dateFmt.format(new Date(ts));
-/** 北京时间 HH:MM，用于统计活跃分钟 */
-export const shanghaiMinute = (ts) => minuteFmt.format(new Date(ts));
+/** 本机时区的业务日期 YYYY-MM-DD */
+export const localDate = (ts) => dateFmt.format(new Date(ts));
+/** 本机时区 HH:MM，用于统计活跃分钟 */
+export const localMinute = (ts) => minuteFmt.format(new Date(ts));
 
 export const projectName = (cwd) => (cwd ? path.basename(cwd) || cwd : '未知项目');
 

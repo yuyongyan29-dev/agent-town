@@ -1,4 +1,4 @@
-import { shanghaiDate, shanghaiMinute, projectName, clip, ASK_TOOLS, LONG_TOOLS } from './util.js';
+import { localDate, localMinute, projectName, clip, ASK_TOOLS, LONG_TOOLS } from './util.js';
 
 const RING_MS = 24 * 3600e3;
 const RING_MAX = 30000;
@@ -52,7 +52,7 @@ export class Store {
   }
 
   bucket(ts, agent, project) {
-    const d = shanghaiDate(ts);
+    const d = localDate(ts);
     let day = this.days.get(d);
     if (!day) { day = {}; this.days.set(d, day); }
     const a = (day[agent] ||= {});
@@ -70,7 +70,7 @@ export class Store {
     const activity = ev.kind !== 'meta';
     if (activity && ts > s.lastActivity) s.lastActivity = ts;
     const b = activity ? this.bucket(ts, s.agent, project) : null;
-    if (b) b.minutes.add(shanghaiMinute(ts));
+    if (b) b.minutes.add(localMinute(ts));
     let out = null; // 进入环形缓冲 / 推送给前端的事件
 
     switch (ev.kind) {
@@ -195,7 +195,7 @@ export class Store {
   }
 
   todayOf(s) {
-    const day = this.days.get(shanghaiDate(Date.now()));
+    const day = this.days.get(localDate(Date.now()));
     return day?.[s.agent]?.[projectName(s.cwd)];
   }
 
@@ -215,7 +215,7 @@ export class Store {
       });
     }
     sessions.sort((a, b) => b.lastActivity - a.lastActivity);
-    return { now, sessions, agents: [...this.agents.values()], today: this.daySummary(shanghaiDate(now)) };
+    return { now, sessions, agents: [...this.agents.values()], today: this.daySummary(localDate(now)) };
   }
 
   daySummary(date) {
@@ -239,7 +239,7 @@ export class Store {
   report(days = 30) {
     const out = [];
     const now = Date.now();
-    for (let i = days - 1; i >= 0; i--) out.push(this.daySummary(shanghaiDate(now - i * 86400e3)));
+    for (let i = days - 1; i >= 0; i--) out.push(this.daySummary(localDate(now - i * 86400e3)));
     return out;
   }
 
@@ -256,7 +256,7 @@ export class Store {
   }
 
   prune() {
-    const cutoff = shanghaiDate(Date.now() - DAYS_KEEP * 86400e3);
+    const cutoff = localDate(Date.now() - DAYS_KEEP * 86400e3);
     for (const d of this.days.keys()) if (d < cutoff) this.days.delete(d);
     const ringCut = Date.now() - RING_MS;
     while (this.ring.length && this.ring[0].ts < ringCut) this.ring.shift();

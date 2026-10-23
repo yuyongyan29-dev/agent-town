@@ -1,6 +1,6 @@
 // 2D 面板：统计条、会话列表、右侧抽屉（详情 / 报表 / 定时 / 派单 / 事件）、工具栏、提示
 import { getJSON, postJSON } from './api.js';
-import { AGENT, CAT, STATUS, esc, fmtAgo, fmtDur, fmtHM, fmtClock, fmtNum, shanghaiParts, displayTitle, rename } from './util.js';
+import { AGENT, CAT, STATUS, esc, fmtAgo, fmtDur, fmtHM, fmtClock, fmtNum, localParts, displayTitle, rename } from './util.js';
 
 const $ = (id) => document.getElementById(id);
 const ORDER = { waiting: 0, stalled: 1, working: 2, done: 3, idle: 4, sleep: 5 };
@@ -213,7 +213,7 @@ export class Hud {
 
   // ---------- 时钟、天气、定时 ----------
   setClock(now) {
-    const p = shanghaiParts(now);
+    const p = localParts(now);
     $('clock-time').textContent = `${p.hh}:${p.mm}`;
     $('clock-date').textContent = `${p.month}月${p.day}日 周${p.week}`;
   }

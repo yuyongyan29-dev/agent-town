@@ -7,9 +7,12 @@
   "scripts": {
     "start": "node server/index.js",
     "hooks:install": "node scripts/install-hooks.js",
-    "hooks:uninstall": "node scripts/install-hooks.js --uninstall"
+    "hooks:uninstall": "node scripts/install-hooks.js --uninstall",
+    "assets": "/Applications/Blender.app/Contents/MacOS/Blender -b -P tools/bake_town.py -- public/assets"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "three": "0.170.0"
   }
