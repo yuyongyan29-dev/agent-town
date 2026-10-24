@@ -1,7 +1,8 @@
 // Agent 角色：Claude Code 是陶土色小螃蟹，Codex 是紫色小云朵，其他 agent 是主题色小机器人
-// 模型由 Blender 烘焙（public/assets/props.glb），这里只做整体的起伏、跳、转圈、抖动
+// 模型由 Blender 烘焙（public/assets/props.glb），拆成身体、眼睛、手臂、腿、天线几个部件，这里转动部件做动作
 import * as THREE from 'three';
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { AGENT } from './util.js';
 import { MODELS, bakedMat } from './world.js';
 
@@ -13,11 +14,29 @@ function label(cls, html) {
 }
 
 const kindOf = (agent) => (agent === 'claude' || agent === 'codex' ? agent : 'bot');
-/** 烘焙好的角色模型；机器人是浅灰的，按主题色上色 */
-function figure(name, agent, color) {
-  const m = MODELS[`${name}-${kindOf(agent)}`].clone();
-  if (kindOf(agent) === 'bot') m.material = bakedMat(m.material.map, color);
-  return m;
+const TINTED = ['body', 'head', 'armL', 'armR']; // 机器人的外壳是浅灰的，按主题色上色；面罩、眼睛、天线保持原色
+const partsOf = (kind) => Object.keys(MODELS).filter((k) => k.startsWith(`agent-${kind}_`)).map((k) => [k.slice(kind.length + 7), MODELS[k]]);
+
+/** 烘焙好的角色：每个部件一个网格，原点在转轴上 */
+function figure(agent, color) {
+  const kind = kindOf(agent), g = new THREE.Group(), parts = {};
+  const tint = kind === 'bot' && bakedMat(MODELS['agent-bot_body'].material.map, color);
+  for (const [name, m] of partsOf(kind)) {
+    const c = m.clone();
+    if (tint && TINTED.includes(name)) c.material = tint;
+    g.add(c);
+    parts[name] = c;
+  }
+  return { g, parts };
+}
+
+/** 子代理小分身：同一个角色缩小，部件合成一个网格，一个分身只画一次 */
+const miniGeo = {};
+function mini(agent, color) {
+  const kind = kindOf(agent);
+  miniGeo[kind] ||= mergeGeometries(partsOf(kind).map(([, m]) => m.geometry.clone().applyMatrix4(new THREE.Matrix4().compose(m.position, m.quaternion, m.scale)))).scale(0.3, 0.3, 0.3);
+  const map = MODELS[`agent-${kind}_body`].material.map;
+  return new THREE.Mesh(miniGeo[kind], kind === 'bot' ? bakedMat(map, color) : MODELS[`agent-${kind}_body`].material);
 }
 
 export class AgentActor {
@@ -41,8 +60,11 @@ export class AgentActor {
 
     this.model = new THREE.Group();
     this.root.add(this.model);
-    this.model.add(figure('agent', agent, this.accent));
-    this.parts = { legs: [], claws: [], eyes: [], spin: null };
+    const fig = figure(agent, this.accent);
+    this.model.add(fig.g);
+    const p = fig.parts;
+    this.kind = kindOf(agent);
+    this.parts = { legs: Object.keys(p).filter((k) => k.startsWith('leg')).map((k) => p[k]), arms: [p.armL, p.armR].filter(Boolean), eyes: [p.eyeL, p.eyeR].filter(Boolean), antenna: p.antenna };
 
     const name = label('label pill agent-pill', `<i style="background:${this.accent}"></i><b></b><span></span>`);
     name.el.querySelector('b').textContent = AGENT[agent].name;
@@ -111,7 +133,7 @@ export class AgentActor {
   setMinis(n) {
     while (this.minis.length < n) {
       const g = new THREE.Group();
-      g.add(figure('mini', this.agent, this.accent));
+      g.add(mini(this.agent, this.accent));
       g.userData.phase = this.minis.length / 6;
       this.miniGroup.add(g);
       this.minis.push(g);
@@ -157,12 +179,20 @@ export class AgentActor {
     this.model.position.y = y; // 烘焙的模型自带站在底座上的高度
     this.model.rotation.set(0, this.face + rotY, rotZ);
 
-    P.legs.forEach((l, i) => { l.rotation.x = working ? Math.sin(t * 14 + i * 1.7) * 0.5 : 0; });
-    P.claws.forEach((c, i) => { c.rotation.x = working ? Math.sin(t * 9 + i * Math.PI) * 0.35 : st === 'waiting' ? -0.6 + Math.sin(t * 5) * 0.3 : 0; });
-    if (P.spin) {
-      if (this.agent === 'claude') P.spin.rotation.z += dt * (working ? 3 : 0.4);
-      else P.spin.rotation.z = working ? Math.sin(t * 8) * 0.3 : 0;
-    }
+    // 干活时小腿交替踏步、两手轮流敲键盘；等你处理时举右手招呼；撒彩纸时两手高举
+    P.legs.forEach((l, i) => { l.rotation.x = working ? Math.sin(t * 14 + i * 1.7) * 0.4 : 0; });
+    P.arms.forEach((a, i) => {
+      const side = Math.sign(a.position.x);
+      let rx = 0, rz = 0;
+      if (working) {
+        if (this.kind === 'claude') rz = side * Math.sin(t * 10 + i * Math.PI) * 0.3; // 螃蟹的手横着伸出，上下扇
+        else rx = -0.6 + Math.sin(t * 12 + i * Math.PI) * 0.3;
+      }
+      if (st === 'waiting' && side > 0) rz = 1.1 + Math.sin(t * 9) * 0.35;
+      if (this.spinT < 1) rz = side * 1.3 * Math.sin(this.spinT * Math.PI);
+      a.rotation.set(rx, 0, rz);
+    });
+    if (P.antenna) P.antenna.rotation.z = working || st === 'waiting' ? Math.sin(t * 6) * 0.25 : 0;
     const blink = !this.calm() && (t % 4.3) < 0.12;
     for (const e of P.eyes) e.scale.y = st === 'sleep' ? 0.15 : blink ? 0.2 : 1;
     const glow = st === 'waiting' ? 0.75 + 0.25 * Math.sin(t * 6) : working ? 0.7 + Math.sin(t * 3) * 0.2 : 0.45;

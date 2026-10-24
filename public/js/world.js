@@ -4,12 +4,15 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
-import { ISLAND, POND, DISTRICT, blocked } from './layout.js';
-import { rng, clamp } from './util.js';
+import { ISLAND, POND, blocked } from './layout.js';
+import { rng, clamp, hash } from './util.js';
 
 const col = (c) => new THREE.Color(c);
 const mix = (a, b, t) => a + (b - a) * t;
 const LOD_DIST = 170; // 相机离街区超过这个距离只留街区名牌，树和小部件不画
+const GROUND = 3000; // 无限大地：一张跟着镜头走的大平面，边缘藏在雾里
+const MACRO = 160; // 大尺度明暗变化的周期（米），盖住草地贴图的重复感；大地按它的整数倍挪动，图案不会跟着动
+const CHUNK = 24; // 森林按块生成，同一块每次长出同样的树
 
 const WEATHER = {
   clear: { cloud: 1, rain: 0, snow: 0, fog: 0, storm: 0 },
@@ -56,10 +59,56 @@ export function releaseTextures(renderer) {
   }
 }
 
+export const TEX = {}; // 草地、街区阴影图、大尺度明暗
+
+/** 能无缝重复的大尺度明暗图：几层随机光斑，在四边绕回去画，接缝看不出来 */
+function macroTex() {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 256;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, 256, 256);
+  const r = rng(21);
+  for (let i = 0; i < 90; i++) {
+    const x = r() * 256, y = r() * 256, rad = 20 + r() * 60, a = 0.05 + r() * 0.07;
+    for (const dx of [-256, 0, 256]) for (const dy of [-256, 0, 256]) {
+      const gr = g.createRadialGradient(x + dx, y + dy, 0, x + dx, y + dy, rad);
+      gr.addColorStop(0, `rgba(60,70,40,${a})`); gr.addColorStop(1, 'rgba(60,70,40,0)');
+      g.fillStyle = gr; g.fillRect(x + dx - rad, y + dy - rad, rad * 2, rad * 2);
+    }
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+
+/** 贴图按世界坐标对齐：平面中心在 (x, z)、尺寸 w×d，图案每 tile 米重复一次，不同平面的同一位置图案一致 */
+function align(t, x, z, w, d, tile) {
+  t.repeat.set(w / tile, d / tile);
+  t.offset.set((x - w / 2) / tile, -(z + d / 2) / tile);
+}
+
+/** 草地材质：无缝草地 × 大尺度明暗（× 可选的阴影图），按世界坐标铺 */
+function groundMat(x, z, w, d, shadow) {
+  const map = TEX.grass.clone(), ao = TEX.macro.clone();
+  align(map, x, z, w, d, T.grassTile);
+  align(ao, x, z, w, d, MACRO);
+  const m = bakedMat(map);
+  m.aoMap = ao;
+  if (shadow) { m.lightMap = shadow; m.lightMapIntensity = Math.PI / T.groundLit; }
+  return m;
+}
+
 export async function loadTown() {
   T = await (await fetch('/assets/town.json')).json();
+  const tl = new THREE.TextureLoader();
+  const [grass, shadow] = await Promise.all(['grass', 'district-shadow'].map((n) => tl.loadAsync(`/assets/${n}.webp`)));
+  grass.colorSpace = shadow.colorSpace = THREE.SRGBColorSpace;
+  grass.wrapS = grass.wrapT = THREE.RepeatWrapping;
+  grass.anisotropy = 8;
+  shadow.channel = 1; // 阴影图用第二套 UV（铺满整块街区），草地和明暗用第一套（按世界坐标重复）
+  Object.assign(TEX, { grass, shadow, macro: macroTex() });
   const loader = new GLTFLoader();
-  await Promise.all(['district', 'wild', 'trees', 'factories', 'props'].map(async (f) => {
+  await Promise.all(['district', 'trees', 'factories', 'props'].map(async (f) => {
     const g = await loader.loadAsync(`/assets/${f}.glb`);
     g.scene.traverse((o) => {
       if (!o.isMesh) return;
@@ -85,6 +134,14 @@ const hitbox = (geo, pick) => {
   return m;
 };
 
+/** 平滑的随机起伏（值噪声），0~1：决定森林哪里密、哪里是林间空地 */
+function noise2(x, z) {
+  const xi = Math.floor(x), zi = Math.floor(z), fx = x - xi, fz = z - zi;
+  const h = (i, j) => (hash(`${xi + i},${zi + j}`) % 1000) / 1000;
+  const sx = fx * fx * (3 - 2 * fx), sz = fz * fz * (3 - 2 * fz);
+  return (h(0, 0) * (1 - sx) + h(1, 0) * sx) * (1 - sz) + (h(0, 1) * (1 - sx) + h(1, 1) * sx) * sz;
+}
+
 /** 按 town.json 的清单把树摆出来：每个原型一批实例，一次绘制 */
 function forest(list) {
   const by = new Map();
@@ -108,7 +165,6 @@ export class World {
     this.scene.fog = new THREE.Fog('#cfe6c4', 90, 220);
     this.pickables = [];
     this.districts = {};
-    this.wilds = new Map(); // "i,j" → 空地
     this.env = { night: 0, day: 0.5, ...WEATHER.partly };
     this.target = { night: 0, day: 0.5, ...WEATHER.partly };
     this.flash = 0;
@@ -124,6 +180,7 @@ export class World {
     this.glowMat = new THREE.SpriteMaterial({ map: radialTex('rgba(255,214,150,1)', 'rgba(255,214,150,0)'), transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending });
     this.poolMat = new THREE.MeshBasicMaterial({ map: radialTex('rgba(255,200,130,1)', 'rgba(255,200,130,0)'), transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending });
     this.buildWeather();
+    this.buildGround();
     this.applyEnv(0);
   }
 
@@ -132,23 +189,88 @@ export class World {
     const d = new District(this, agent, meta, pos);
     this.districts[agent] = d;
     this.scene.add(d.group);
-    this.layoutWilds();
+    this.forestKey = '';
     return d;
   }
 
-  /** 街区围成的矩形里没人占的格子铺上树林，画布连成一整片 */
-  layoutWilds() {
-    const W = DISTRICT.w, D = DISTRICT.d;
-    const cells = Object.values(this.districts).map((d) => [Math.round(d.group.position.x / W), Math.round(d.group.position.z / D)]);
-    const used = new Set(cells.map((c) => c.join()));
-    const need = new Set();
-    const [is, js] = [cells.map((c) => c[0]), cells.map((c) => c[1])];
-    for (let i = Math.min(...is); i <= Math.max(...is); i++) for (let j = Math.min(...js); j <= Math.max(...js); j++) if (!used.has(`${i},${j}`)) need.add(`${i},${j}`);
-    for (const [k, w] of this.wilds) if (!need.has(k)) w.group.removeFromParent();
-    for (const k of need) {
-      if (!this.wilds.has(k)) { const [i, j] = k.split(',').map(Number); this.wilds.set(k, new Wild([i * W, j * D])); }
-      this.scene.add(this.wilds.get(k).group);
+  removeDistrict(agent) {
+    const d = this.districts[agent];
+    if (!d) return;
+    d.group.removeFromParent();
+    d.group.traverse((o) => o.element?.remove()); // 名牌是 DOM，跟着拿掉
+    const inD = (o) => { for (; o; o = o.parent) if (o === d.group) return true; return false; };
+    this.pickables = this.pickables.filter((o) => !inD(o));
+    delete this.districts[agent];
+    this.forestKey = '';
+  }
+
+  // ---------- 无限大地与森林 ----------
+  buildGround() {
+    this.groundMat = groundMat(0, 0, GROUND, GROUND);
+    this.ground = new THREE.Mesh(new THREE.PlaneGeometry(GROUND, GROUND).rotateX(-Math.PI / 2), this.groundMat);
+    this.ground.material.depthWrite = false; // 垫在最底下，街区自己的地面直接盖在上面，不会闪
+    this.ground.renderOrder = -1;
+    this.ground.position.y = -0.02;
+    this.scene.add(this.ground);
+    // 森林：每个树原型一批实例，镜头走到哪长到哪；树下压一圈柔和的影子
+    this.trees = Object.keys(MODELS).filter((k) => /^tree\d$/.test(k)).sort().map((k) => {
+      const im = new THREE.InstancedMesh(MODELS[k].geometry, MODELS[k].material, 3000);
+      im.count = 0;
+      this.scene.add(im);
+      return im;
+    });
+    const blob = new THREE.MeshBasicMaterial({ map: radialTex('rgba(18,28,40,0.55)', 'rgba(18,28,40,0)'), transparent: true, depthWrite: false });
+    this.blobs = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), blob, 8000);
+    this.blobs.count = 0;
+    this.blobs.renderOrder = 1;
+    this.scene.add(this.blobs);
+    this.forestKey = '';
+  }
+
+  /** 镜头附近的森林：按块生成，块坐标定了树就定了；避开街区；离镜头越远看得越广 */
+  updateForest(target) {
+    const radius = Math.round(clamp(this.camDist * 1.5, 90, 220) / 30) * 30;
+    const cx0 = Math.floor((target.x - radius) / CHUNK), cx1 = Math.floor((target.x + radius) / CHUNK);
+    const cz0 = Math.floor((target.z - radius) / CHUNK), cz1 = Math.floor((target.z + radius) / CHUNK);
+    const key = [cx0, cx1, cz0, cz1].join();
+    if (key === this.forestKey) return;
+    this.forestKey = key;
+    // 大地跟着镜头挪，按明暗周期的整数倍挪，图案不动
+    const gx = Math.round(target.x / MACRO) * MACRO, gz = Math.round(target.z / MACRO) * MACRO;
+    this.ground.position.x = gx; this.ground.position.z = gz;
+    align(this.groundMat.map, gx, gz, GROUND, GROUND, T.grassTile);
+    align(this.groundMat.aoMap, gx, gz, GROUND, GROUND, MACRO);
+    const W = T.island.hw + 1.5, D = T.island.hd + 1.5;
+    const ds = Object.values(this.districts).map((d) => d.group.position);
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), p = new THREE.Vector3(), sc = new THREE.Vector3();
+    for (const im of this.trees) im.count = 0;
+    let nb = 0;
+    const cx = (cx0 + cx1) / 2 * CHUNK, cz = (cz0 + cz1) / 2 * CHUNK;
+    // 从视野中心往外一块块种，树数到上限时少掉的是最远的一圈，而不是某一侧
+    const chunks = [];
+    for (let i = cx0; i <= cx1; i++) for (let j = cz0; j <= cz1; j++) chunks.push([i, j, Math.hypot((i + 0.5) * CHUNK - cx, (j + 0.5) * CHUNK - cz)]);
+    chunks.sort((a, b) => a[2] - b[2]);
+    for (const [i, j] of chunks) {
+      const r = rng(hash(`forest:${i},${j}`));
+      for (let gxx = 0; gxx < CHUNK; gxx += 2.2) for (let gzz = 0; gzz < CHUNK; gzz += 2.2) {
+        const x = i * CHUNK + gxx + (r() - 0.5) * 2, z = j * CHUNK + gzz + (r() - 0.5) * 2;
+        const pick = r(), size = r(), ry = (r() - 0.5) * 0.8, tall = r(), keep = r();
+        if (Math.hypot(x - cx, z - cz) > radius) continue;
+        // 林子有疏有密：大部分地方是稀疏的树，起伏最低的地方才是林间空地
+        const dens = clamp(0.3 + (noise2(x / 45, z / 45) - 0.3) * 1.8) * 0.85;
+        if (keep > dens) continue;
+        if (ds.some((o) => Math.abs(x - o.x) < W && Math.abs(z - o.z) < D)) continue;
+        const idx = pick < 0.08 ? 7 : pick > 0.9 ? 6 : Math.floor(pick * 6.6) % 6;
+        const im = this.trees[idx];
+        if (!im || im.count >= 3000 || nb >= 8000) continue;
+        const k = 0.8 + size * 0.55;
+        im.setMatrixAt(im.count++, m.compose(p.set(x, 0, z), q.setFromEuler(e.set(0, ry, 0)), sc.set(k, k * (0.9 + tall * 0.25), k)));
+        // 影子顺着阳光方向（往右后方）拉长，和街区里烘焙的树影一致
+        this.blobs.setMatrixAt(nb++, m.compose(p.set(x + 0.9 * k, 0.03, z - 0.45 * k), q.setFromEuler(e.set(0, 0.42, 0)), sc.set(k * (idx === 6 ? 1.8 : 3.4), 1, k * (idx === 6 ? 1.4 : 2.2))));
+      }
     }
+    for (const im of [...this.trees, this.blobs]) { im.instanceMatrix.needsUpdate = true; im.computeBoundingSphere(); }
+    this.blobs.count = nb;
   }
 
   // ---------- 天气粒子 ----------
@@ -255,7 +377,8 @@ export class World {
     this.frustum.setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
     const size = new THREE.Vector3(ISLAND.hw * 2, 12, ISLAND.hd * 2);
     let near = null, best = Infinity;
-    for (const d of [...Object.values(this.districts), ...[...this.wilds.values()].filter((w) => w.group.parent)]) {
+    this.updateForest(target);
+    for (const d of Object.values(this.districts)) {
       const o = d.group.position;
       d.group.visible = this.frustum.intersectsBox(this.box.setFromCenterAndSize(new THREE.Vector3(o.x, 3, o.z), size));
       if (!d.group.visible) continue;
@@ -264,7 +387,7 @@ export class World {
       d.lod.visible = far;
       if (!far) d.update?.(dt, t);
       const k = Math.hypot(o.x - target.x, o.z - target.z);
-      if (d.agent && k < best) { best = k; near = d; }
+      if (k < best) { best = k; near = d; }
     }
     this.rain.position.set(target.x, 0, target.z);
     this.snow.position.set(target.x, 0, target.z);
@@ -317,7 +440,12 @@ export class District {
     this.slotUsed = new Array(T.slotZ.length).fill(0);
     const L = T.layout, W = T.island.hw * 2, D = T.island.hd * 2;
 
-    // 地面、传送带、中转站、广场等静态部分：一个网格一张烘焙贴图
+    // 地面：和无限大地同一种草，再叠上这块街区烘焙的阴影图，边缘看不出接缝
+    const geo = new THREE.PlaneGeometry(W, D).rotateX(-Math.PI / 2);
+    geo.setAttribute('uv1', geo.attributes.uv.clone());
+    this.groundMesh = new THREE.Mesh(geo, groundMat(x, z, W, D, TEX.shadow));
+    this.group.add(this.groundMesh);
+    // 传送带、中转站、广场等静态部分：一个网格一张烘焙贴图
     this.group.add(MODELS.district.clone());
     const dome = MODELS.dome_glass.clone();
     dome.material = world.glass;
@@ -402,6 +530,15 @@ export class District {
     this.lod.visible = false;
   }
 
+  /** 挪到 (x, z)：地面贴图按世界坐标重新对齐，森林重新避让 */
+  moveTo(x, z) {
+    this.group.position.set(x, 0, z);
+    const m = this.groundMesh.material, W = T.island.hw * 2, D = T.island.hd * 2;
+    align(m.map, x, z, W, D, T.grassTile);
+    align(m.aoMap, x, z, W, D, MACRO);
+    this.world.forestKey = '';
+  }
+
   /** 项目占用的车间；没见过的项目占用最久没用的槽位 */
   slotOf(project) {
     let i = this.slots.indexOf(project);
@@ -455,17 +592,5 @@ export class District {
         p.material.color.copy(this.world.shade);
       }
     }
-  }
-}
-
-/** 街区之间的空地：只有树林 */
-class Wild {
-  constructor([x, z]) {
-    this.group = new THREE.Group();
-    this.group.position.set(x, 0, z);
-    this.full = new THREE.Group();
-    this.lod = new THREE.Group();
-    this.group.add(MODELS.wild.clone(), this.full, this.lod);
-    this.full.add(forest(T.wildTrees));
   }
 }

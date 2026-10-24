@@ -139,7 +139,6 @@ def M_(name):
     """常用材质"""
     return {
         'grass': lambda: pbr('grass', '#6f8c47', 0.95, pattern='noise', scale=0.9, bump=0.35, vary='#526e35'),
-        'soil': lambda: pbr('soil', '#7a5236', 0.95, pattern='noise', scale=1.5, bump=0.5, vary='#5a3a24'),
         'rock': lambda: pbr('rock', '#8f8a80', 0.85, pattern='noise', scale=3.5, bump=0.8, vary='#6c675e'),
         'concrete': lambda: pbr('concrete', '#bdb8ae', 0.9, pattern='noise', scale=4, bump=0.15, vary='#a7a299'),
         'concrete_dark': lambda: pbr('concrete_dark', '#9c978e', 0.9, pattern='noise', scale=4, bump=0.2, vary='#86817a'),
@@ -470,32 +469,81 @@ def place_trees(coll, spots, rnd, autumn=0.12):
     return out
 
 
-# ---------- 地皮（街区与空地共用） ----------
-def ground(b, rnd, ok):
-    W, D = HW * 2, HD * 2
-    b.box(M_('grass'), W, 0.6, D, 0, -0.3, 0)
-    b.box(M_('soil'), W, 2.6, D, 0, -1.9, 0)
-    b.box(M_('rock'), W, 1.4, D, 0, -3.8, 0)
+# ---------- 地面：街区只烘一张阴影图，草地本身由网页用无缝贴图铺满整个无限画布 ----------
+def ground_plane(coll, name, w, d, m):
+    """一块 w×d 的平面，UV 从 (0,0) 铺到 (1,1)，和网页里 PlaneGeometry 的 UV 方向一致"""
+    me = bpy.data.meshes.new(name)
+    vs = [(-w / 2, -d / 2, 0), (w / 2, -d / 2, 0), (w / 2, d / 2, 0), (-w / 2, d / 2, 0)]
+    me.from_pydata(vs, [], [(0, 1, 2, 3)])
+    uv = me.uv_layers.new(name='bake')
+    for li, vi in enumerate(me.polygons[0].vertices):
+        uv.data[li].uv = ((vs[vi][0] + w / 2) / w, (vs[vi][1] + d / 2) / d)
+    ob = bpy.data.objects.new(name, me)
+    ob.data.materials.append(m)
+    coll.objects.link(ob)
+    return ob
 
 
+def grass_tile_mat(tile):
+    """能无缝重复的草地：把平面的 UV 绕成环面喂给 4D 噪声，左右、上下两头自然接得上"""
+    m = bpy.data.materials.new('grass_tile')
+    nt = m.node_tree
+    N, L = nt.nodes, nt.links
+    p = N['Principled BSDF']
+    sep = N.new('ShaderNodeSeparateXYZ'); L.new(N.new('ShaderNodeTexCoord').outputs['UV'], sep.inputs[0])
+    r = tile * 0.9 / (2 * math.pi)  # 和街区草地一样，每米约 0.9 个噪声周期
+    def op(kind, a, b=None):
+        n = N.new('ShaderNodeMath'); n.operation = kind
+        L.new(a, n.inputs[0])
+        if b is not None:
+            if isinstance(b, (int, float)): n.inputs[1].default_value = b
+            else: L.new(b, n.inputs[1])
+        return n.outputs[0]
+    au, av = op('MULTIPLY', sep.outputs[0], 2 * math.pi), op('MULTIPLY', sep.outputs[1], 2 * math.pi)
+    comb = N.new('ShaderNodeCombineXYZ')
+    L.new(op('MULTIPLY', op('COSINE', au), r), comb.inputs[0])
+    L.new(op('MULTIPLY', op('SINE', au), r), comb.inputs[1])
+    L.new(op('MULTIPLY', op('COSINE', av), r), comb.inputs[2])
+    w4 = op('MULTIPLY', op('SINE', av), r)
+    def noise4d(scale):
+        nz = N.new('ShaderNodeTexNoise'); nz.noise_dimensions = '4D'
+        nz.inputs['Scale'].default_value = scale; nz.inputs['Detail'].default_value = 8
+        L.new(comb.outputs[0], nz.inputs['Vector']); L.new(w4, nz.inputs['W'])
+        return nz.outputs['Fac']
+    rp = N.new('ShaderNodeValToRGB'); rp.color_ramp.elements[0].color = srgb('#526e35'); rp.color_ramp.elements[1].color = srgb('#6f8c47')
+    rp.color_ramp.elements[0].position = 0.3; rp.color_ramp.elements[1].position = 0.7
+    L.new(noise4d(1.0), rp.inputs['Fac']); L.new(rp.outputs['Color'], p.inputs['Base Color'])
+    bp = N.new('ShaderNodeBump'); bp.inputs['Strength'].default_value = 0.35; bp.inputs['Distance'].default_value = 0.02
+    L.new(noise4d(6.0), bp.inputs['Height']); L.new(bp.outputs['Normal'], p.inputs['Normal'])
+    p.inputs['Roughness'].default_value = 0.95
+    return m
 
-def flowers(b, rnd, ok, n=120):
-    colors = ['#c9b2ec', '#a88fdc', '#f3c9d8', '#fff1b8', '#ffffff', '#e86f6a']
-    pos, tries = [], 0
-    while len(pos) < n and tries < 3000:
-        tries += 1
-        x, z = (rnd.random() * 2 - 1) * (HW - 2), (rnd.random() * 2 - 1) * (HD - 2)
-        if ok(x, z):
-            pos.append((x, z))
-    for i, (x, z) in enumerate(pos):
-        c = pbr('flower' + colors[i % len(colors)], colors[i % len(colors)], 0.6, pattern='flat', sss=0.2)
-        stem = pbr('stem', '#4e7a2f', 0.8, pattern='flat')
-        for _ in range(7):
-            a, d, sz = rnd.random() * 6.28, rnd.random() * 0.7, 0.06 + rnd.random() * 0.05
-            fx, fz = x + math.cos(a) * d, z + math.sin(a) * d
-            hgt = 0.15 + rnd.random() * 0.15
-            b.cyl(stem, 0.012, 0.012, hgt, fx, hgt / 2, fz, seg=4)
-            b.sphere(c, sz, fx, hgt + sz * 0.5, fz, 1, 0.6, 1, seg=(6, 4))
+
+def bake_image(sc, ob, m, name, size, samples, fade=None):
+    """把物体（材质 m）烘到一张图，存成 webp 文件；返回图里的像素（sRGB 0~1）。
+    fade=(横向比例, 纵向比例, 目标值)：图的四边按比例宽度渐变到目标值"""
+    if QUICK: size, samples = max(128, size // 4), max(8, samples // 8)
+    img = bpy.data.images.new(name, size, size, alpha=False)
+    n = m.node_tree.nodes.new('ShaderNodeTexImage'); n.image = img; m.node_tree.nodes.active = n
+    sc.cycles.samples = samples
+    with ctx(ob):
+        bpy.ops.object.bake(type='COMBINED', use_clear=True)
+    m.node_tree.nodes.remove(n)
+    if fade:
+        import numpy as np
+        fx, fz, target = fade
+        a = np.array(img.pixels[:], dtype=np.float32).reshape(size, size, 4)
+        u = np.linspace(0, 1, size)
+        wx = np.clip(np.minimum(u, 1 - u) / fx, 0, 1)
+        wz = np.clip(np.minimum(u, 1 - u) / fz, 0, 1)
+        w = (np.minimum(wz[:, None], wx[None, :]) ** 1.5)[..., None]
+        a[..., :3] = a[..., :3] * w + target * (1 - w)
+        img.pixels[:] = a.ravel()
+    img.filepath_raw = os.path.join(OUT, name + '.webp')
+    img.file_format = 'WEBP'
+    img.save()
+    print('[bake]', name, size, flush=True)
+    return list(img.pixels)
 
 
 def path_ribbon(b, a, c, m):
@@ -560,7 +608,6 @@ def build_district(coll):
     near_belt = lambda x, z, pad=1.0: any(abs(p[0] - x) < pad and abs(p[2] - z) < pad for p in samples[::3])
     in_field = lambda x, z: -18.5 <= x < HUB['x'] - HUB['r'] + 1 and abs(z) < 19.5
     open_ground = lambda x, z: (not near_belt(x, z)) if in_field(x, z) else (not blocked(x, z, 0.1) and not on_path(x, z, 0.95))
-    ground(b, rnd, open_ground)
 
     # 车间地坪：混凝土，黄色安全线
     b.box(M_('concrete'), 12.5, 0.2, 43, -24.75, 0.0, 0, bevel=0.04)
@@ -723,31 +770,6 @@ def build_district(coll):
     return info
 
 
-def build_wild(coll):
-    b = Builder(coll)
-    rnd = random.Random(7)
-    glades = [((rnd.random() - 0.5) * HW * 1.2, (rnd.random() - 0.5) * HD * 1.2, 5 + rnd.random() * 5) for _ in range(2)]
-    in_glade = lambda x, z, pad=0: any(math.hypot(x - gx, z - gz) < gr - pad for gx, gz, gr in glades)
-    ground(b, rnd, lambda x, z: True)
-    spots = []
-    x = -HW + 0.9
-    while x < HW - 0.5:
-        z = -HD + 0.9
-        while z < HD - 0.5:
-            px_, pz_ = x + (rnd.random() - 0.5) * 1.3, z + (rnd.random() - 0.5) * 1.3
-            if rnd.random() >= 0.15 and not in_glade(px_, pz_):
-                spots.append((px_, pz_, 0.75 + rnd.random() * 0.55, rnd.random()))
-            z += 1.9
-        x += 1.9
-    for _ in range(14):  # 空地上的几块石头
-        gx, gz, gr = glades[int(rnd.random() * 2)]
-        a, rr = rnd.random() * 6.28, rnd.random() * (gr - 1)
-        k = 0.2 + rnd.random() * 0.35
-        b.sphere(M_('rock'), 1, gx + math.cos(a) * rr, k * 0.3, gz + math.sin(a) * rr, k * 1.3, k * 0.8, k, seg=(8, 6))
-    b.done()
-    return place_trees(coll, spots, rnd)
-
-
 def build_dome(coll):
     b = Builder(coll)
     hx, hz, hr = HUB['x'], HUB['z'], HUB['r']
@@ -892,56 +914,91 @@ def toy(key, color, rough=0.32, sss=0.0):
 
 
 def build_agent(coll, kind):
-    b = Builder(coll)
-    y = 0.28
-    if kind == 'claude':
-        shell, dark = toy('shell', '#d97757'), toy('dark', '#a9533a')
-        b.box(shell, 2.2, 1.35, 1.6, 0, y + 1.05, 0, bevel=0.45)
-        starburst(b, toy('star', '#fff8f0', 0.25), 0, y + 1.15, 0.82)
-        for x in (-0.5, 0.5):
-            b.cyl(dark, 0.06, 0.06, 0.4, x, y + 1.85, 0.25, seg=10)
-            b.sphere(toy('eye', '#1d1715', 0.15), 0.17, x, y + 2.08, 0.25, seg=(18, 12))
-        for side in (-1, 1):
-            for k in (-0.5, 0, 0.5):
-                b.cyl(dark, 0.08, 0.06, 0.7, side * 1.25, y + 0.4, k, seg=10)
-            b.sphere(shell, 0.3, side * 1.57, y + 1.1, 0.95, 1, 0.8, 1.2, seg=(18, 12))
-            b.box(dark, 0.08, 0.1, 0.32, side * 1.57, y + 1.1, 1.28, bevel=0.02)
-    elif kind == 'codex':
-        cloud, light = toy('cloud', '#8f8dff', 0.4, 0.2), toy('cloud2', '#b7b5ff', 0.4, 0.2)
-        for x, yy, z, r, m in ((0, 1.15, 0, 0.9, cloud), (-0.75, 0.95, 0.05, 0.62, light), (0.75, 0.95, 0.05, 0.66, light), (-0.35, 1.65, -0.05, 0.6, cloud), (0.4, 1.7, -0.1, 0.55, light), (0, 0.8, 0.3, 0.6, cloud)):
-            b.sphere(m, r, x, y + yy, z, seg=(28, 18))
-        b.box(toy('screen', '#23224a', 0.15), 1.05, 0.66, 0.06, 0, y + 1.2, 0.9, bevel=0.03)
-        white = pbr('codex_glyph', '#ffffff', 0.3, pattern='flat', emit=1.5, emit_color='#ffffff')
-        for s in (-1, 1): b.box(white, 0.26, 0.06, 0.03, -0.18, y + 1.2 + s * 0.07, 0.94, ry=s * 0.6)
-        b.box(white, 0.22, 0.06, 0.03, 0.15, y + 1.03, 0.94)
-        for x in (-0.42, 0.42): b.sphere(toy('feet', '#5f5ccf'), 0.24, x, y + 0.28, 0.13, 1, 0.6, 1.3)
-        b.cyl(toy('feet', '#5f5ccf'), 0.035, 0.035, 0.4, 0.15, y + 2.35, -0.1, seg=8)
-        b.sphere(pbr('bulb', '#ffd36b', 0.3, pattern='flat', emit=2, emit_color='#ffb800'), 0.1, 0.15, y + 2.6, -0.1)
-    else:
-        shell, dark = toy('bot', '#ecedf2'), toy('botdark', '#9fa3ad')
-        b.box(shell, 1.7, 1.5, 1.4, 0, y + 1.2, 0, bevel=0.35)
-        b.box(toy('visor', '#1e2032', 0.12), 1.3, 0.8, 0.1, 0, y + 1.3, 0.68, bevel=0.05)
-        for x in (-0.3, 0.3): b.sphere(pbr('boteye', '#9ff5e6', 0.3, pattern='flat', emit=2.5, emit_color='#6ff0d8'), 0.12, x, y + 1.32, 0.74)
-        for x in (-0.45, 0.45): b.box(dark, 0.4, 0.4, 0.55, x, y + 0.3, 0.05, bevel=0.12)
-        for side in (-1, 1):
-            b.cyl(dark, 0.08, 0.08, 0.6, side * 0.95, y + 1.05, 0, seg=10)
-            b.sphere(shell, 0.16, side * 0.95, y + 0.73, 0)
-        b.cyl(dark, 0.035, 0.035, 0.4, 0, y + 2.15, 0, seg=8)
-        b.sphere(pbr('bulb', '#ffd36b', 0.3, pattern='flat', emit=2, emit_color='#ffb800'), 0.1, 0, y + 2.4, 0)
-    b.done()
+    """角色拆成几个部件，每个部件以自己的转轴为原点：网页里转动手臂、腿、天线，缩放眼睛眨眼。
+    返回 {部件名: (物体列表, 转轴)}"""
+    y = 0.28  # 底座顶面
+    parts = {}
 
+    def part(name, pivot, fn):
+        b = Builder(coll)
+        fn(b)
+        parts[name] = (b.done(), pivot)
 
-def build_mini(coll, kind):
-    b = Builder(coll)
-    m = toy('mini' + kind, {'claude': '#d97757', 'codex': '#8f8dff'}.get(kind, '#ecedf2'))
+    ink, white = toy('ink', '#17120f', 0.12), toy('glint', '#ffffff', 0.2)
     if kind == 'claude':
-        b.box(m, 0.6, 0.4, 0.45, 0, 0.3, 0, bevel=0.15)
+        # 照着 Claude Code 终端里的小螃蟹 Clawd：方方的陶土色身体、两只竖条眼睛、两侧短手、底下四条小腿
+        shell, deep = toy('shell', '#d97757'), toy('shelldeep', '#c4633f')
+        by = y + 0.55 + 0.62
+        part('body', (0, by, 0), lambda b: b.box(shell, 2.2, 1.24, 1.5, 0, by, 0, bevel=0.24))
+        for side, nm in ((-1, 'eyeL'), (1, 'eyeR')):
+            ex, ey = side * 0.42, by + 0.16
+            def eye(b, ex=ex, ey=ey):
+                b.box(ink, 0.26, 0.56, 0.06, ex, ey, 0.775, bevel=0.025)
+                b.sphere(white, 0.06, ex + 0.04, ey + 0.15, 0.8, seg=(10, 8))
+            part(nm, (ex, ey, 0.775), eye)
+            part('arm' + nm[-1], (side * 1.0, by - 0.08, 0.1), lambda b, side=side: b.box(shell, 0.6, 0.38, 0.52, side * 1.2, by - 0.08, 0.1, bevel=0.14))
+        for i, lx in enumerate((-0.78, -0.27, 0.27, 0.78)):
+            part(f'leg{i}', (lx, y + 0.6, 0.05), lambda b, lx=lx: b.box(deep, 0.26, 0.62, 0.34, lx, y + 0.3, 0.05, bevel=0.09))
     elif kind == 'codex':
-        b.sphere(m, 0.3, 0, 0.32, 0); b.sphere(m, 0.2, 0.25, 0.25, 0)
+        # 浮在半空的小云朵：圆脸、腮红，肚子上一块终端小屏幕显示 >_
+        cloud, light = toy('cloud', '#9896ff', 0.42, 0.25), toy('cloud2', '#c4c2ff', 0.42, 0.25)
+        cy = y + 1.45
+
+        def body(b):
+            for x, yy, z, r, m in ((0, 0, 0, 0.86, cloud), (-0.74, -0.25, 0.05, 0.6, light), (0.74, -0.22, 0.05, 0.62, light),
+                                   (-0.38, 0.5, -0.06, 0.56, light), (0.4, 0.55, -0.1, 0.58, cloud), (0, -0.38, 0.26, 0.6, cloud)):
+                b.sphere(m, r, x, cy + yy, z, seg=(32, 20))
+            b.box(toy('screen', '#24234d', 0.15), 0.56, 0.32, 0.08, 0, cy - 0.42, 0.84, bevel=0.06)
+            glyph = pbr('codex_glyph', '#ffffff', 0.3, pattern='flat', emit=1.5, emit_color='#ffffff')
+            for s_ in (-1, 1): b.box(glyph, 0.13, 0.035, 0.02, -0.12, cy - 0.42 + s_ * 0.035, 0.885, ry=s_ * 0.6)
+            b.box(glyph, 0.12, 0.035, 0.02, 0.07, cy - 0.5, 0.885)
+            blush = toy('blush', '#ff9db5', 0.5)
+            for s_ in (-1, 1): b.sphere(blush, 0.12, s_ * 0.52, cy - 0.1, 0.65, 1, 0.6, 0.45, seg=(14, 10))
+            for i in range(7):  # 微笑
+                t = (i - 3) / 3
+                b.sphere(ink, 0.03, t * 0.14, cy - 0.17 + t * t * 0.06, 0.84, seg=(8, 6))
+        part('body', (0, cy, 0), body)
+        for side, nm in ((-1, 'L'), (1, 'R')):
+            ex, ey = side * 0.3, cy + 0.1
+            def eye(b, ex=ex, ey=ey):
+                b.sphere(ink, 0.15, ex, ey, 0.79, 0.8, 1.25, 0.45, seg=(16, 12))
+                b.sphere(white, 0.05, ex + 0.04, ey + 0.08, 0.85, seg=(10, 8))
+            part('eye' + nm, (ex, ey, 0.78), eye)
     else:
-        b.box(m, 0.5, 0.5, 0.45, 0, 0.3, 0, bevel=0.12)
-    for x in (-0.1, 0.1): b.sphere(toy('eye', '#1d1715', 0.15), 0.05, x, 0.4, 0.22)
-    b.done()
+        # 小机器人：圆角方脑袋、深色面罩上两只发光的眼睛、头顶天线；外壳是浅灰的，网页按主题色上色
+        shell, dark = toy('bot', '#eceef3'), toy('botdark', '#a4a8b2')
+        glow = pbr('boteye', '#9ff5e6', 0.3, pattern='flat', emit=2.5, emit_color='#6ff0d8')
+        hy = y + 1.72
+
+        def body(b):
+            for x in (-0.34, 0.34): b.box(dark, 0.42, 0.26, 0.6, x, y + 0.13, 0.06, bevel=0.1)
+            b.box(shell, 1.12, 0.8, 0.86, 0, y + 0.68, 0, bevel=0.28)
+            b.cyl(dark, 0.22, 0.26, 0.2, 0, y + 1.12, 0, seg=20)
+        part('body', (0, y, 0), body)
+
+        def head(b):
+            b.box(shell, 1.62, 1.16, 1.22, 0, hy, 0, bevel=0.36)
+            for s_ in (-1, 1): b.sphere(dark, 0.22, s_ * 0.83, hy, 0, 0.45, 1, 1, seg=(16, 12))
+        part('head', (0, hy, 0), head)
+
+        def face(b):
+            b.box(toy('visor', '#1c1f30', 0.1), 1.2, 0.74, 0.1, 0, hy + 0.02, 0.6, bevel=0.1)
+            b.box(glow, 0.22, 0.045, 0.03, 0, hy - 0.2, 0.66)
+            b.sphere(pbr('chest', '#ffd36b', 0.3, pattern='flat', emit=2, emit_color='#ffb800'), 0.08, 0, y + 0.78, 0.44)
+        part('face', (0, hy, 0.6), face)
+        for side, nm in ((-1, 'L'), (1, 'R')):
+            ex = side * 0.28
+            part('eye' + nm, (ex, hy + 0.06, 0.66), lambda b, ex=ex: b.sphere(glow, 0.11, ex, hy + 0.06, 0.66, 0.9, 1.45, 0.4, seg=(16, 12)))
+            def arm(b, side=side):
+                b.box(dark, 0.2, 0.46, 0.2, side * 0.7, y + 0.62, 0, bevel=0.08)
+                b.sphere(shell, 0.16, side * 0.7, y + 0.34, 0.02, seg=(16, 12))
+            part('arm' + nm, (side * 0.66, y + 0.88, 0), arm)
+
+        def antenna(b):
+            b.cyl(dark, 0.035, 0.035, 0.42, 0, hy + 0.78, 0, seg=8)
+            b.sphere(pbr('bulb', '#ffd36b', 0.3, pattern='flat', emit=2, emit_color='#ffb800'), 0.11, 0, hy + 1.02, 0)
+        part('antenna', (0, hy + 0.58, 0), antenna)
+    return parts
 
 
 # ---------- 烘焙与导出 ----------
@@ -1012,10 +1069,13 @@ def merge(objs, name):
 
 
 def unwrap(ob, margin=0.002):
-    me = ob.data
-    while me.uv_layers: me.uv_layers.remove(me.uv_layers[0])
-    me.uv_layers.new(name='bake')
-    with ctx(ob):
+    """展 UV；传一组物体时它们一起展开、排进同一张图"""
+    obs = ob if isinstance(ob, list) else [ob]
+    for o in obs:
+        me = o.data
+        while me.uv_layers: me.uv_layers.remove(me.uv_layers[0])
+        me.uv_layers.new(name='bake')
+    with ctx(obs[0], obs):
         bpy.ops.object.mode_set(mode='EDIT')
         bpy.ops.mesh.select_all(action='SELECT')
         bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=margin, area_weight=1.0)
@@ -1026,23 +1086,25 @@ def bake(sc, ob, name, size, samples):
     """把物体在当前场景里看到的光照、颜色烘进一张图，然后换成只引用这张图的材质"""
     if QUICK: size, samples = max(128, size // 4), max(8, samples // 8)
     img = bpy.data.images.new(name, size, size, alpha=False)
+    obs = ob if isinstance(ob, list) else [ob]
     added = []
-    for m in ob.data.materials:
+    for m in {m for o in obs for m in o.data.materials}:
         n = m.node_tree.nodes.new('ShaderNodeTexImage')
         n.image = img
         m.node_tree.nodes.active = n
         added.append((m, n))
     sc.cycles.samples = samples
-    with ctx(ob):
+    with ctx(obs[0], obs):
         bpy.ops.object.bake(type='COMBINED', use_clear=True)
     for m, n in added: m.node_tree.nodes.remove(n)
     baked = bpy.data.materials.new(name)
     p = baked.node_tree.nodes['Principled BSDF']
     t = baked.node_tree.nodes.new('ShaderNodeTexImage'); t.image = img
     baked.node_tree.links.new(t.outputs['Color'], p.inputs['Base Color'])
-    ob.data.materials.clear()
-    ob.data.materials.append(baked)
-    for poly in ob.data.polygons: poly.material_index = 0
+    for o in obs:
+        o.data.materials.clear()
+        o.data.materials.append(baked)
+        for poly in o.data.polygons: poly.material_index = 0
     print('[bake]', name, size, flush=True)
     return ob
 
@@ -1106,23 +1168,39 @@ def main():
     frame = [o for o in dome.objects if o not in glass]
     gc = collection('dome_glass')  # 玻璃不参与烘焙：Cycles 里玻璃会挡住阳光，把转盘烘成黑的
     for o in glass: dome.objects.unlink(o); gc.objects.link(o)
-    only(sc, [c, fc, dome])
+    # 地面先用草地材质参与烘焙（给建筑和树提供草地的反光），之后换成白色单独烘出阴影图
+    gcol = collection('ground')
+    gp = ground_plane(gcol, 'ground', HW * 2, HD * 2, M_('grass'))
+    only(sc, [c, fc, dome, gcol])
     static = merge([o for o in c.objects if o.type == 'MESH'] + frame, 'district')
     unwrap(static, 0.001)
     bake(sc, static, 'district', 3072, 256)  # 4096 显存要 85MB，3072 约 48MB，清晰度差别很小
+    gray = pbr('gray', '#808080', 0.95, pattern='flat')  # 用白色会亮到截断，灰色留出余量，网页再按 groundLit 归一化
+    gp.data.materials.clear(); gp.data.materials.append(gray)
+    # 亮度基准：同样的灰色地面放在空旷处（没有任何遮挡）烘一小块，网页按它把阴影图归一化，
+    # 这样街区里不在阴影中的地面，和外面无限大地的亮度完全一样
+    rcol = collection('ground_ref')
+    rp = ground_plane(rcol, 'ground_ref', 60, 60, gray)
+    only(sc, [rcol])
+    px = bake_image(sc, rp, gray, 'ground-ref', 64, 256)
+    lit = sum(px[0::4]) / (len(px) // 4)
+    os.remove(os.path.join(OUT, 'ground-ref.webp'))
+    meta['groundLit'] = round(((lit + 0.055) / 1.055) ** 2.4, 4)
+    only(sc, [c, fc, dome, gcol])
+    # 边缘 2.5 米内逐渐过渡到无遮挡的亮度，街区地面和外面的大地柔和地接上
+    bake_image(sc, gp, gray, 'district-shadow', 2048, 256, fade=(2.5 / (HW * 2), 2.5 / (HD * 2), lit))
     only(sc, [gc])
     g = merge(glass, 'dome_glass')
     plain(g, 'dome_glass', '#eef6fb')
     export([static, g], 'district')
 
-    # 空地：地皮 + 树
-    w = collection('wild')
-    meta['wildTrees'] = build_wild(w)
-    only(sc, [w])
-    wild = merge([o for o in w.objects if o.type == 'MESH'], 'wild')
-    unwrap(wild, 0.001)
-    bake(sc, wild, 'wild', 1536, 192)
-    export([wild], 'wild')
+    # 无缝草地贴图：网页用它铺满整个无限画布（街区地面也是它 × 阴影图）
+    tcol = collection('grass_tile')
+    TILE = 8
+    tp = ground_plane(tcol, 'grass_tile', TILE, TILE, grass_tile_mat(TILE))
+    only(sc, [tcol])
+    bake_image(sc, tp, tp.data.materials[0], 'grass', 1024, 256)
+    meta['grassTile'] = TILE
     export(tree_objs, 'trees')
 
     # 车间：三种造型，主体烘焙；屋顶烘成浅灰由网页上色；窗户不烘焙，网页按亮灯与否上色
@@ -1157,17 +1235,28 @@ def main():
     box = merge(box, 'parcel'); unwrap(box); bake(sc, box, 'parcel', 256, 96)
     tape = merge(tape, 'tape'); unwrap(tape); bake(sc, tape, 'tape', 128, 96)
     parts += [box, tape]
-    for name, fn in (('ped', build_ped), ('agent-claude', lambda c: build_agent(c, 'claude')), ('agent-codex', lambda c: build_agent(c, 'codex')),
-                     ('agent-bot', lambda c: build_agent(c, 'bot')), ('mini-claude', lambda c: build_mini(c, 'claude')),
-                     ('mini-codex', lambda c: build_mini(c, 'codex')), ('mini-bot', lambda c: build_mini(c, 'bot'))):
+    col = collection('ped')
+    build_ped(col)
+    floor_for_bake(col, 0, 2.5)
+    only(sc, [col])
+    ob = merge([o for o in col.objects if o.type == 'MESH'][:-1], 'ped'); unwrap(ob)
+    parts.append(bake(sc, ob, 'ped', 512, 128))
+    # 角色：各部件共用一张图；导出时每个部件是单独的网格（名字 agent-<种类>_<部件>），原点在转轴上
+    for kind in ('claude', 'codex', 'bot'):
+        name = 'agent-' + kind
         col = collection(name)
-        fn(col)
-        floor_for_bake(col, 0, 2.5)
+        ps = build_agent(col, kind)
+        floor_for_bake(col, 0.28, 2.5)
         only(sc, [col])
-        objs = [o for o in col.objects if o.type == 'MESH'][:-1]
-        ob = merge(objs, name); unwrap(ob)
-        bake(sc, ob, name, 512 if name.startswith(('agent', 'ped')) else 128, 128)
-        parts.append(ob)
+        obs = []
+        for pn, (objs, pivot) in ps.items():
+            o = merge(objs, f'{name}_{pn}')
+            pv = bl(*pivot)
+            o.data.transform(Matrix.Translation(-pv)); o.location = pv
+            obs.append(o)
+        unwrap(obs)
+        bake(sc, obs, name, 1024, 128)
+        parts += obs
     export(parts, 'props')
 
     with open(os.path.join(OUT, 'town.json'), 'w') as fp:

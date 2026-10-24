@@ -8,6 +8,7 @@ import { ClaudeSource } from './claude.js';
 import { CodexSource } from './codex.js';
 import { applyHook, ingest, AGENT_ID } from './hooks.js';
 import { listSchedules } from './schedule.js';
+import { detectAgents, loadManualAgents, addAgent, removeAgent } from './agents.js';
 import { getWeather } from './weather.js';
 import { dispatch, listJobs } from './dispatch.js';
 
@@ -26,6 +27,7 @@ const tailer = new Tailer();
 const sources = [new ClaudeSource(store, tailer), new CodexSource(store, tailer)];
 store.agent('claude', { name: 'Claude Code', color: '#e07a5f', log: true });
 store.agent('codex', { name: 'Codex', color: '#7b7cff', log: true });
+loadManualAgents(store); // 用户手动添加过的 agent
 
 const t0 = Date.now();
 for (const s of sources) await s.poll();
@@ -95,6 +97,9 @@ const server = http.createServer(async (req, res) => {
       const hm = p.match(/^\/hook\/([^/]+)$/);
       if (hm && AGENT_ID.test(hm[1])) return json(res, { ok: applyHook(store, hm[1], body) });
       if (p === '/api/ingest') return json(res, { accepted: ingest(store, body) });
+      if (p === '/api/agents' || p === '/api/agents/remove') {
+        try { return json(res, p === '/api/agents' ? addAgent(store, body) : { ok: removeAgent(store, String(body.id || '')) }); } catch (e) { return json(res, { error: e.message }, 400); }
+      }
       if (p === '/api/dispatch') {
         const allowed = new Set([...store.sessions.values()].map((s) => s.cwd).filter(Boolean));
         try { return json(res, dispatch(body, allowed)); } catch (e) { return json(res, { error: e.message }, 400); }
@@ -110,6 +115,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (p === '/api/state') return json(res, store.snapshot());
+    if (p === '/api/agents/detect') return json(res, detectAgents(store));
     if (p === '/api/events') return json(res, store.events(+url.searchParams.get('since') || 0, url.searchParams.get('sid') || undefined));
     if (p.startsWith('/api/session/')) {
       const d = store.sessionDetail(decodeURIComponent(p.slice(13)));

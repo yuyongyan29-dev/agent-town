@@ -23,11 +23,12 @@ const ICONS = {
   panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
   report: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   dispatch: '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/>',
+  agents: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M19 8v6M16 11h6"/>',
 };
 const TOOLS = [
   ['home', '回到全景'], ['rotL', '左转'], ['rotR', '右转'], ['zoomIn', '放大'], ['zoomOut', '缩小'], '|',
   ['labels', '名牌'], ['tour', '巡游'], ['tank', '鱼缸'], ['weather', '天气'], ['time', '昼夜'], ['quality', '画质'], '|',
-  ['sound', '声音'], ['notify', '通知'], ['replay', '回放'], ['report', '报表'], ['dispatch', '派单'], ['panel', '面板'],
+  ['sound', '声音'], ['notify', '通知'], ['replay', '回放'], ['report', '报表'], ['dispatch', '派单'], ['agents', 'agent'], ['panel', '面板'],
 ];
 
 const agentTag = (a) => `<span class="ag" style="--c:${AGENT[a]?.color || '#888'}">${esc(AGENT[a]?.name || a)}</span>`;
@@ -96,7 +97,7 @@ export class Hud {
       t.remove();
     });
     $('drawer-body').addEventListener('click', (e) => this.onDrawerClick(e));
-    $('drawer-body').addEventListener('submit', (e) => { e.preventDefault(); this.submitDispatch(e.target); });
+    $('drawer-body').addEventListener('submit', (e) => { e.preventDefault(); e.target.id === 'agent-form' ? this.addAgent(e.target) : this.submitDispatch(e.target); });
   }
 
   // ---------- 工具栏 ----------
@@ -107,7 +108,7 @@ export class Hud {
       const b = e.target.closest('[data-act]');
       if (!b) return;
       const act = b.dataset.act;
-      if (act === 'report' || act === 'dispatch') this.tab === act ? this.closeDrawer() : this.openTab(act);
+      if (act === 'report' || act === 'dispatch' || act === 'agents') this.tab === act ? this.closeDrawer() : this.openTab(act);
       else this.onAction(act);
     });
   }
@@ -251,6 +252,7 @@ export class Hud {
     if (tab === 'detail') { this.loadDetail(); this.timers.tab = setInterval(() => this.loadDetail(), 3000); }
     if (tab === 'report') this.loadReport();
     if (tab === 'dispatch') { this.loadDispatch(); this.timers.tab = setInterval(() => this.loadJobs(), 3000); }
+    if (tab === 'agents') this.loadAgents();
   }
 
   closeDrawer() {
@@ -268,10 +270,12 @@ export class Hud {
       : this.tab === 'report' ? this.reportHtml()
       : this.tab === 'schedule' ? this.scheduleHtml()
       : this.tab === 'dispatch' ? this.dispatchHtml()
+      : this.tab === 'agents' ? this.agentsHtml()
       : this.tab === 'events' ? this.eventsHtml(this.events) : '';
     if (this.html.drawer === html) return;
-    // 派单表单正在输入时不整块重绘，只更新任务列表
+    // 派单、添加 agent 的表单正在输入时不整块重绘
     if (this.tab === 'dispatch' && body.querySelector('form')) { this.renderJobs(); return; }
+    if (this.tab === 'agents' && body.querySelector('#agent-form input:focus')) return;
     this.html.drawer = html;
     body.innerHTML = html;
     body.scrollTop = keep;
@@ -442,6 +446,56 @@ export class Hud {
     btn.disabled = false;
   }
 
+  // agent：检测本机装了哪些 agent，手动添加或移除
+  async loadAgents() {
+    try { this.detected = await getJSON('/api/agents/detect'); } catch { this.detected = []; }
+    if (this.tab === 'agents') this.renderTab();
+  }
+
+  agentsHtml() {
+    const list = this.detected;
+    const known = new Set((list || []).map((a) => a.id));
+    const added = Object.entries(AGENT).filter(([id]) => !known.has(id));
+    const row = (a) => {
+      const on = !!AGENT[a.id] || a.added;
+      const btn = on ? (a.log ? '<span class="hint" style="margin:0">读本机日志</span>' : `<button class="btn" data-agent-remove="${esc(a.id)}">移除</button>`)
+        : `<button class="btn primary" data-agent-add="${esc(a.id)}">添加</button>`;
+      const where = a.installed ? (a.path.includes('/bin/') ? `找到命令 <code class="mono">${esc(a.path)}</code>` : `找到配置目录 <code class="mono">${esc(a.path)}</code>`) : '本机没找到';
+      return `<div class="agent-row"><i style="background:${a.color}"></i><div><b>${esc(a.name)}</b><div class="hint" style="margin:2px 0 0">${where}</div></div>${btn}</div>`;
+    };
+    let h = `<h3>agent</h3><div class="hint">检测本机装了哪些 AI 编程 agent。添加后小镇里会为它开一个街区。Claude Code 和 Codex 直接读本机日志；其他 agent 需要把事件推给小镇，方法见下面。</div>`;
+    h += list ? list.map(row).join('') : '<div class="empty-tip">检测中…</div>';
+    if (added.length) h += `<h4>自定义添加的</h4>${added.map(([id, a]) => row({ id, name: a.name, color: a.color, installed: false, path: '', added: true, log: false }).replace('本机没找到', `标识 <code class="mono">${esc(id)}</code>`)).join('')}`;
+    h += `<h4>添加其他 agent</h4><form class="form" id="agent-form"><label>名称</label><input name="name" placeholder="例如：我的脚本 agent" maxlength="24">
+      <label>颜色</label><input name="color" type="color" value="#4aa3df">
+      <div class="btns"><button class="btn primary" type="submit">添加</button><span class="hint" id="agent-msg" style="margin:0;align-self:center"></span></div></form>
+      <h4>怎么把事件推给小镇</h4><div class="hint">支持 hook 的 agent：在它的 hook 配置里调用 <code class="mono">node scripts/hook.js &lt;标识&gt;</code>。其他程序：向 <code class="mono">POST /api/ingest</code> 推事件，格式见 README。</div>`;
+    return h;
+  }
+
+  async changeAgent(kind, id) {
+    try {
+      if (kind === 'add') { const a = this.detected?.find((x) => x.id === id); await postJSON('/api/agents', { id, name: a?.name, color: a?.color }); }
+      else await postJSON('/api/agents/remove', { id });
+      if (kind === 'remove') delete AGENT[id];
+    } catch (e) { this.toast({ kind: 'error', title: kind === 'add' ? '添加失败' : '移除失败', body: e.message }); }
+    this.loadAgents();
+  }
+
+  async addAgent(form) {
+    const name = form.name.value.trim();
+    const msg = document.getElementById('agent-msg');
+    if (!name) { msg.textContent = '先填名称'; return; }
+    // 标识由名称生成；名称里没有英文字母或数字时（比如纯中文），用时间戳兜底
+    const id = name.toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || `agent-${Date.now().toString(36)}`;
+    try {
+      await postJSON('/api/agents', { id, name, color: form.color.value });
+      form.name.value = '';
+      msg.textContent = `已添加，标识 ${id}`;
+    } catch (e) { msg.textContent = e.message; }
+    this.loadAgents();
+  }
+
   // 事件
   pushEvent(ev) {
     this.events.unshift(ev);
@@ -458,6 +512,8 @@ export class Hud {
 
   onDrawerClick(e) {
     const t = e.target;
+    const add = t.closest('[data-agent-add]'), del = t.closest('[data-agent-remove]');
+    if (add || del) return this.changeAgent(add ? 'add' : 'remove', (add || del).dataset.agentAdd || del.dataset.agentRemove);
     const days = t.closest('[data-days]'), metric = t.closest('[data-metric]');
     if (days) { this.report.days = +days.dataset.days; this.html.drawer = null; this.renderTab(); this.loadReport(true); return; }
     if (metric) { this.report.metric = metric.dataset.metric; this.renderTab(); return; }

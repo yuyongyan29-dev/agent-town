@@ -52,7 +52,7 @@ npm run hooks:install    # 卸载：npm run hooks:uninstall
 - **中转站和广场**：工具调用结束后，包裹送到 agent 的工作台，再码到托盘上，攒满一托就发货。
 - **角色**：Claude Code 是小螃蟹，Codex 是小云朵，其他 agent 是主题色的小机器人。在等你处理时头上冒出感叹号，休眠时打瞌睡，干完一轮会撒彩纸。
 - **天气和昼夜**：昼夜按本机时间。天气默认取北京实况，可以用环境变量 `AT_CITY` / `AT_LAT` / `AT_LON` 换成你所在的城市。两者都能在工具栏手动切换。
-- **无限画布**：每多一个 agent，就自动在空地上开一个新街区；街区之间的空格子铺成树林。按住 Shift 拖动街区可以挪位置，右下角小地图显示全部街区和当前视野。
+- **无限画布**：一整片连续的大地，草地和树林跟着镜头无限延伸，走到哪里长到哪里。每多一个 agent，就自动在空地上开一个新街区；按住 Shift 拖动街区可以挪到任意位置，右下角小地图显示全部街区和当前视野。
 
 ## 功能
 
@@ -62,12 +62,13 @@ npm run hooks:install    # 卸载：npm run hooks:uninstall
 - **报表**：近 7 天或 30 天的轮次、工具调用、tokens 和工作分钟，按天、按项目、按 agent 统计。
 - **定时任务**：读取本机的 crontab 和 launchd 用户任务。
 - **派单**：在指定项目目录里，直接让 Claude Code 或 Codex 非交互地跑一条任务。
+- **agent**：检测本机装了哪些 AI 编程 agent（Gemini CLI、Cursor Agent、Copilot CLI、OpenCode、Qwen Code、Aider、Goose、Amp、Crush、Kiro 等），一键添加成街区；也可以填名称和颜色添加自定义 agent。手动添加的记在 `~/.agent-town/agents.json`。
 - **回放**：以 10 / 30 / 60 倍速重放最近 1 小时。
 - **镜头**：左键平移、右键旋转、滚轮朝光标缩放。另有全景、巡游、鱼缸模式（隐藏面板缓慢旋转，适合挂在副屏上）。
 
 ## 接入其他 agent
 
-任何能发 HTTP 请求的程序，都可以把事件推到 `POST /api/ingest`（只接受本机请求）。agent 名用小写字母、数字和 `_.-`，第一次出现时会自动开出一个新街区：
+在工具栏「agent」里添加之后，街区就开好了；也可以跳过这一步，第一次推事件时自动开街区。任何能发 HTTP 请求的程序，都可以把事件推到 `POST /api/ingest`（只接受本机请求）。agent 名用小写字母、数字和 `_.-`：
 
 ```bash
 curl -X POST http://localhost:4317/api/ingest -H 'Content-Type: application/json' -d '{
@@ -87,7 +88,7 @@ curl -X POST http://localhost:4317/api/ingest -H 'Content-Type: application/json
 
 ## 画面是怎么做的
 
-模型由 Blender 程序化生成（`tools/bake_town.py`）：砖墙厂房、彩钢瓦屋顶、橡胶传送带、钢板转盘、铺路石、池塘和树林。用 Cycles 把光照、阴影和角落的暗部烘焙进贴图，导出成 `public/assets/*.glb`，布局坐标一起导出到 `public/assets/town.json`。
+模型由 Blender 程序化生成（`tools/bake_town.py`）：砖墙厂房、彩钢瓦屋顶、橡胶传送带、钢板转盘、铺路石、池塘和树林。用 Cycles 把光照、阴影和角落的暗部烘焙进贴图，导出成 `public/assets/*.glb`，布局坐标一起导出到 `public/assets/town.json`。无缝草地 `grass.webp` 和街区地面的阴影图 `district-shadow.webp` 也在这里烘出；网页里的大地用同一张草地贴图铺满，街区外的树林按坐标随机生成，所以街区和外面的大地是连在一起的。
 
 网页用 three.js 显示，所有模型都只贴烘焙好的图，不做实时光照和阴影。阴天、夜晚在贴图上整体调色，路灯和亮着的窗户单独发光。车间屋顶的漆色、包裹胶带的颜色、机器人的主题色都烘焙成浅色，在网页里再上色。
 

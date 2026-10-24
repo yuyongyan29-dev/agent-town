@@ -62,17 +62,16 @@ const LAYOUT_KEY = 'agent-town:districts';
 let spots = {};
 try { spots = JSON.parse(localStorage.getItem(LAYOUT_KEY) || '{}'); } catch {}
 const saveSpots = () => { try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(spots)); } catch {} };
-// 街区按格子排，边挨着边；格子坐标 = 位置 / 街区尺寸
-const toCell = ([x, z]) => [Math.round(x / DISTRICT.w) * DISTRICT.w, Math.round(z / DISTRICT.d) * DISTRICT.d];
-const GRID = [];
-for (let i = -6; i <= 6; i++) for (let j = -6; j <= 6; j++) GRID.push([i * DISTRICT.w, j * DISTRICT.d]);
-GRID.sort((a, b) => Math.hypot(...a) - Math.hypot(...b));
-const cellTaken = ([x, z], except) => Object.values(world.districts).some((d) => d !== except && d.group.position.x === x && d.group.position.z === z);
+// 画布是一整片无限的大地：街区可以放在任何地方，只是不能互相压住；新街区之间隔一片森林
+const GAP = 24;
+const overlaps = ([x, z], except) => Object.values(world.districts).some((d) => d !== except && Math.abs(d.group.position.x - x) < DISTRICT.w + 6 && Math.abs(d.group.position.z - z) < DISTRICT.d + 6);
+const RING = [];
+for (let i = -6; i <= 6; i++) for (let j = -6; j <= 6; j++) RING.push([i * (DISTRICT.w + GAP), j * (DISTRICT.d + GAP)]);
+RING.sort((a, b) => Math.hypot(...a) - Math.hypot(...b));
 function placeDistrict(agent) {
-  // 旧版本存的是自由坐标，吸到最近的格子；格子被占了就重新找
-  const want = spots[agent] && toCell(spots[agent]);
-  const others = Object.entries(spots).filter(([a]) => a !== agent && !world.districts[a]).map(([, p]) => toCell(p).join());
-  spots[agent] = want && !cellTaken(want) ? want : GRID.find((c) => !cellTaken(c) && !others.includes(c.join())) || [0, 0];
+  const others = Object.entries(spots).filter(([a]) => a !== agent && !world.districts[a]).map(([, p]) => p);
+  const free = (c) => !overlaps(c) && !others.some(([x, z]) => Math.abs(x - c[0]) < DISTRICT.w + 6 && Math.abs(z - c[1]) < DISTRICT.d + 6);
+  if (!spots[agent] || overlaps(spots[agent])) spots[agent] = RING.find(free) || [0, 0];
   saveSpots();
   return spots[agent];
 }
@@ -132,6 +131,16 @@ function onState(s) {
   setAgents(s.agents);
   for (const a of s.agents || []) ensureAgent(a.id);
   for (const x of s.sessions) ensureAgent(x.agent);
+  // 被移除的 agent：街区、角色、包裹一起收走
+  const live = new Set([...(s.agents || []).map((a) => a.id), ...s.sessions.map((x) => x.agent)]);
+  for (const id of Object.keys(world.districts)) {
+    if (live.has(id)) continue;
+    for (const [k, p] of parcels.items) if (p.agent === id) parcels.release(k);
+    world.removeDistrict(id);
+    delete actors[id];
+    delete spots[id];
+    saveSpots();
+  }
   hud.setState(s);
   hud.setClock(s.now);
 
@@ -490,7 +499,7 @@ renderer.domElement.addEventListener('pointerdown', (e) => { down = { x: e.clien
 renderer.domElement.addEventListener('pointerup', (e) => {
   if (drag) {
     const p = drag.D.group.position;
-    spots[drag.D.agent] = [p.x, p.z];
+    spots[drag.D.agent] = [Math.round(p.x * 2) / 2, Math.round(p.z * 2) / 2];
     saveSpots();
     drag = null;
     return;
@@ -509,14 +518,9 @@ renderer.domElement.addEventListener('pointerup', (e) => {
 renderer.domElement.addEventListener('pointermove', (e) => {
   if (drag) {
     const h = groundAt(e.clientX, e.clientY);
-    // 按格子跳着挪，目标格有别的街区就不动；挪完重新铺空地
-    const cell = h && toCell([h.x + drag.off.x, h.z + drag.off.z]);
-    const p = drag.D.group.position;
-    if (cell && !cellTaken(cell, drag.D) && (cell[0] !== p.x || cell[1] !== p.z)) {
-      p.set(cell[0], 0, cell[1]);
-      world.layoutWilds();
-      world.near = null;
-    }
+    // 跟着鼠标连续移动；会压到别的街区时停在原地
+    const to = h && [h.x + drag.off.x, h.z + drag.off.z];
+    if (to && !overlaps(to, drag.D)) drag.D.moveTo(...to);
     return;
   }
   if (e.buttons || performance.now() - hoverAt < 60) return;
@@ -558,8 +562,8 @@ function drawMinimap() {
   mctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   mctx.clearRect(0, 0, W, H);
   const w = DISTRICT.w * k, h = DISTRICT.d * k;
-  mctx.fillStyle = '#a9d08a';
-  for (const t of world.wilds.values()) if (t.group.parent) mctx.fillRect(t.group.position.x * k + ox - w / 2, t.group.position.z * k + oz - h / 2, w, h);
+  mctx.fillStyle = '#a9d08a'; // 大地是无限的，底色铺满
+  mctx.fillRect(0, 0, W, H);
   for (const d of ds) {
     const p = d.group.position;
     const x = p.x * k + ox - w / 2, y = p.z * k + oz - h / 2;
