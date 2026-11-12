@@ -43,6 +43,8 @@ npm start
 npm run hooks:install    # 卸载：npm run hooks:uninstall
 ```
 
+改过端口的话，安装时带上同一个端口：`PORT=xxxx npm run hooks:install`。
+
 它会把 hook 合并进 `~/.claude/settings.json` 和 `~/.codex/hooks.json`，保留已有配置，改之前先备份成 `*.agent-town.bak`。小镇没开时 hook 会静默跳过，不影响 agent。
 
 ## 小镇里能看到什么

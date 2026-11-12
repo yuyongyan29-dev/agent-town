@@ -9,7 +9,9 @@ import { fileURLToPath } from 'node:url';
 const uninstall = process.argv.includes('--uninstall');
 const HOOK = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'hook.js');
 const MARK = 'agent-town';
-const cmd = (agent) => `node ${JSON.stringify(HOOK)} ${agent} # ${MARK}`;
+// 用 PORT=xxxx 安装时把端口写进命令，hook 才能找到改过端口的小镇
+const PORT = +(process.env.PORT || 4317);
+const cmd = (agent) => `${PORT === 4317 ? '' : `AGENT_TOWN_PORT=${PORT} `}node ${JSON.stringify(HOOK)} ${agent} # ${MARK}`;
 
 const CLAUDE_EVENTS = ['PermissionRequest', 'Notification', 'PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit', 'Stop', 'StopFailure', 'SessionStart', 'SessionEnd'];
 const CODEX_EVENTS = ['PermissionRequest', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SessionStart'];
